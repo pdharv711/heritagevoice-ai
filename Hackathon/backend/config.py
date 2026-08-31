@@ -15,5 +15,6 @@ PORT = int(os.getenv("PORT", 8000))
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://heritagevoice-ai.vercel.app",
     # Add other origins as needed
 ]

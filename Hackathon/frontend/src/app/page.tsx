@@ -12,6 +12,7 @@ import {
 import LanguageSelector, { getBcp47 } from "@/components/LanguageSelector";
 import CameraFeed from "@/components/CameraFeed";
 import ChatWindow from "@/components/ChatWindow";
+import Footer from "@/components/Footer";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "https://heritagevoice-ai.onrender.com";

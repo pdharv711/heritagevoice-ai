@@ -75,7 +75,7 @@ gemini_available = False
 # Can also be overridden from Render Environment Variables.
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
-    "gemini-3.7-flash",
+    "gemini-3.6-flash",
 )
 
 

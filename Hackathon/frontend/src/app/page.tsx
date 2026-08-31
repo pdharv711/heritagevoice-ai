@@ -253,319 +253,335 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-50 text-gray-900 pb-12">
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-50 shadow-sm">
-        <div className="max-w-md mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center space-x-2.5">
-            <div className="w-9 h-9 bg-rose-500 rounded-xl flex items-center justify-center text-white font-bold shadow-md shadow-rose-200">
-              HV
-            </div>
-
-            <div>
-              <h1 className="font-extrabold text-base tracking-tight text-gray-900 leading-tight">
-                HeritageVoice <span className="text-rose-500">AI</span>
-              </h1>
-              <p className="text-[10px] text-gray-500 font-semibold tracking-wider uppercase">
-                OMNIKON Hackathon 2026
-              </p>
-            </div>
+  <main className="min-h-screen bg-slate-50 text-gray-900 pb-12">
+    <header className="bg-white border-b border-gray-200 sticky top-0 z-50 shadow-sm">
+      <div className="max-w-md mx-auto px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center space-x-2.5">
+          <div className="w-9 h-9 bg-rose-500 rounded-xl flex items-center justify-center text-white font-bold shadow-md shadow-rose-200">
+            HV
           </div>
 
-          <div className="text-right flex flex-col items-end gap-1">
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-gray-100 text-gray-700 border border-gray-200">
-              Tech Sparker
-            </span>
+          <div>
+            <h1 className="font-extrabold text-base tracking-tight text-gray-900 leading-tight">
+              HeritageVoice <span className="text-rose-500">AI</span>
+            </h1>
 
-            <span
-              className={`inline-flex items-center gap-1 text-[9px] font-semibold ${
-                voicesReady ? "text-green-600" : "text-amber-500"
-              }`}
-            >
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  voicesReady
-                    ? "bg-green-500"
-                    : "bg-amber-400 animate-pulse"
-                }`}
-              />
-              {voicesReady ? "Voice Ready" : "Loading voices…"}
-            </span>
-          </div>
-        </div>
-      </header>
-
-      <div className="max-w-md mx-auto px-4 pt-4 space-y-4">
-        <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
-          <LanguageSelector
-            selectedLanguage={language}
-            onChange={handleLanguageChange}
-          />
-
-          {languageLoading && monumentId && (
-            <p className="mt-2 text-[10px] text-rose-500 font-semibold">
-              Generating {language} narration…
+            <p className="text-[10px] text-gray-500 font-semibold tracking-wider uppercase">
+              OMNIKON Hackathon 2026
             </p>
-          )}
+          </div>
         </div>
 
-        <div className="grid grid-cols-3 bg-white p-1 rounded-2xl border border-gray-200 shadow-sm">
-          <button
-            onClick={() => setActiveTab("camera")}
-            className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
-              activeTab === "camera"
-                ? "bg-rose-500 text-white font-bold shadow-sm"
-                : "text-gray-500 hover:text-gray-800 font-medium"
-            }`}
-          >
-            <Camera className="w-5 h-5 mb-0.5" />
-            <span className="text-[11px]">1. Scan</span>
-          </button>
+        <div className="text-right flex flex-col items-end gap-1">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold bg-gray-100 text-gray-700 border border-gray-200">
+            Tech Sparker
+          </span>
 
-          <button
-            onClick={() => monumentId && setActiveTab("audio")}
-            disabled={!monumentId}
-            className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
-              activeTab === "audio"
-                ? "bg-rose-500 text-white font-bold shadow-sm"
-                : monumentId
-                ? "text-gray-500 hover:text-gray-800 font-medium"
-                : "text-gray-300 cursor-not-allowed"
+          <span
+            className={`inline-flex items-center gap-1 text-[9px] font-semibold ${
+              voicesReady ? "text-green-600" : "text-amber-500"
             }`}
           >
-            <Volume2 className="w-5 h-5 mb-0.5" />
-            <span className="text-[11px]">2. Listen</span>
-          </button>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                voicesReady
+                  ? "bg-green-500"
+                  : "bg-amber-400 animate-pulse"
+              }`}
+            />
 
-          <button
-            onClick={() => monumentId && setActiveTab("chat")}
-            disabled={!monumentId}
-            className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
-              activeTab === "chat"
-                ? "bg-rose-500 text-white font-bold shadow-sm"
-                : monumentId
-                ? "text-gray-500 hover:text-gray-800 font-medium"
-                : "text-gray-300 cursor-not-allowed"
-            }`}
-          >
-            <MessageSquare className="w-5 h-5 mb-0.5" />
-            <span className="text-[11px]">3. Discuss</span>
-          </button>
+            {voicesReady ? "Voice Ready" : "Loading voices…"}
+          </span>
         </div>
+      </div>
+    </header>
 
-        <div className="transition-all duration-200">
-          {activeTab === "camera" && (
-            <div className="space-y-4">
-              <CameraFeed
-                onCapture={handleImageCapture}
-                isLoading={loading}
-              />
+    <div className="max-w-md mx-auto px-4 pt-4 space-y-4">
+      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
+        <LanguageSelector
+          selectedLanguage={language}
+          onChange={handleLanguageChange}
+        />
 
-              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-2xl p-4 flex gap-3 text-blue-900 shadow-sm">
-                <Info className="w-5 h-5 shrink-0 text-blue-600 mt-0.5" />
+        {languageLoading && monumentId && (
+          <p className="mt-2 text-[10px] text-rose-500 font-semibold">
+            Generating {language} narration…
+          </p>
+        )}
+      </div>
 
-                <div className="text-xs space-y-1">
-                  <h4 className="font-bold">
-                    How to use HeritageVoice AI:
-                  </h4>
+      <div className="grid grid-cols-3 bg-white p-1 rounded-2xl border border-gray-200 shadow-sm">
+        <button
+          onClick={() => setActiveTab("camera")}
+          className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
+            activeTab === "camera"
+              ? "bg-rose-500 text-white font-bold shadow-sm"
+              : "text-gray-500 hover:text-gray-800 font-medium"
+          }`}
+        >
+          <Camera className="w-5 h-5 mb-0.5" />
+          <span className="text-[11px]">1. Scan</span>
+        </button>
 
-                  <ul className="list-disc pl-4 space-y-1 text-blue-800/90 font-medium">
-                    <li>Select your preferred guide language.</li>
-                    <li>
-                      Point your camera at any monument and tap Identify
-                      Monument.
-                    </li>
-                    <li>Or upload / drag-and-drop a monument photo.</li>
-                    <li>
-                      The AI identifies the monument and speaks its story in
-                      your chosen language.
-                    </li>
-                    <li>
-                      After identification, changing language does not require
-                      another scan.
-                    </li>
-                  </ul>
+        <button
+          onClick={() => monumentId && setActiveTab("audio")}
+          disabled={!monumentId}
+          className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
+            activeTab === "audio"
+              ? "bg-rose-500 text-white font-bold shadow-sm"
+              : monumentId
+              ? "text-gray-500 hover:text-gray-800 font-medium"
+              : "text-gray-300 cursor-not-allowed"
+          }`}
+        >
+          <Volume2 className="w-5 h-5 mb-0.5" />
+          <span className="text-[11px]">2. Listen</span>
+        </button>
+
+        <button
+          onClick={() => monumentId && setActiveTab("chat")}
+          disabled={!monumentId}
+          className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
+            activeTab === "chat"
+              ? "bg-rose-500 text-white font-bold shadow-sm"
+              : monumentId
+              ? "text-gray-500 hover:text-gray-800 font-medium"
+              : "text-gray-300 cursor-not-allowed"
+          }`}
+        >
+          <MessageSquare className="w-5 h-5 mb-0.5" />
+          <span className="text-[11px]">3. Discuss</span>
+        </button>
+      </div>
+
+      <div className="transition-all duration-200">
+        {activeTab === "camera" && (
+          <div className="space-y-4">
+            <CameraFeed
+              onCapture={handleImageCapture}
+              isLoading={loading}
+            />
+
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-2xl p-4 flex gap-3 text-blue-900 shadow-sm">
+              <Info className="w-5 h-5 shrink-0 text-blue-600 mt-0.5" />
+
+              <div className="text-xs space-y-1">
+                <h4 className="font-bold">
+                  How to use HeritageVoice AI:
+                </h4>
+
+                <ul className="list-disc pl-4 space-y-1 text-blue-800/90 font-medium">
+                  <li>Select your preferred guide language.</li>
+
+                  <li>
+                    Point your camera at any monument and tap Identify
+                    Monument.
+                  </li>
+
+                  <li>
+                    Or upload / drag-and-drop a monument photo.
+                  </li>
+
+                  <li>
+                    The AI identifies the monument and speaks its story in
+                    your chosen language.
+                  </li>
+
+                  <li>
+                    After identification, changing language does not require
+                    another scan.
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "audio" && monumentName && narration && (
+          <div className="space-y-4">
+            <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-4">
+              <div className="flex justify-between items-start">
+                <div>
+                  <span className="text-[10px] text-rose-500 font-bold uppercase tracking-wider">
+                    Identified Structure
+                  </span>
+
+                  <h2 className="font-extrabold text-xl text-gray-900 leading-tight">
+                    {monumentName}
+                  </h2>
+                </div>
+
+                <button
+                  onClick={resetApp}
+                  className="p-2 text-gray-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all border border-gray-200"
+                  title="Scan another monument"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-100 rounded-xl p-3.5 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`p-2 rounded-lg ${
+                      isSpeaking
+                        ? "bg-rose-500 text-white animate-pulse"
+                        : "bg-gray-200 text-gray-600"
+                    }`}
+                  >
+                    <Volume2 className="w-5 h-5" />
+                  </div>
+
+                  <div>
+                    <h4 className="font-bold text-xs">
+                      Audio Guide Playback
+                    </h4>
+
+                    <p className="text-[10px] text-gray-500 font-medium">
+                      Language: {language}
+                    </p>
+
+                    {activeVoiceName && (
+                      <p
+                        className="text-[9px] text-gray-400 font-medium truncate max-w-[150px]"
+                        title={activeVoiceName}
+                      >
+                        🔊 {activeVoiceName}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  onClick={
+                    isSpeaking
+                      ? stopNarration
+                      : () => speakText(narration, language)
+                  }
+                  disabled={languageLoading}
+                  className={`py-2 px-4 font-bold text-xs rounded-lg transition-all ${
+                    isSpeaking
+                      ? "bg-gray-800 text-white hover:bg-gray-900"
+                      : "bg-rose-500 text-white hover:bg-rose-600 shadow-md shadow-rose-100"
+                  }`}
+                >
+                  {isSpeaking ? "⏹ Stop" : "▶ Listen"}
+                </button>
+              </div>
+
+              <div className="border-t border-gray-100 pt-4">
+                <h4 className="font-bold text-xs text-gray-500 mb-2 uppercase tracking-wide">
+                  Historical Story
+                </h4>
+
+                <div className="bg-slate-50/50 rounded-xl p-3.5 border border-slate-100/50">
+                  <p className="text-sm font-medium leading-relaxed text-gray-800 whitespace-pre-wrap italic">
+                    &ldquo;{narration}&rdquo;
+                  </p>
                 </div>
               </div>
             </div>
-          )}
 
-          {activeTab === "audio" && monumentName && narration && (
-            <div className="space-y-4">
-              <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-4">
-                <div className="flex justify-between items-start">
+            {details && (
+              <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
+                <div className="flex items-center space-x-2 border-b border-gray-100 pb-2">
+                  <Landmark className="w-4 h-4 text-rose-500" />
+
+                  <h3 className="font-bold text-sm text-gray-800">
+                    Historical Record
+                  </h3>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3.5 text-xs">
                   <div>
-                    <span className="text-[10px] text-rose-500 font-bold uppercase tracking-wider">
-                      Identified Structure
-                    </span>
+                    <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
+                      Location
+                    </p>
 
-                    <h2 className="font-extrabold text-xl text-gray-900 leading-tight">
-                      {monumentName}
-                    </h2>
+                    <p className="font-bold text-gray-800 leading-snug">
+                      {details.location}
+                    </p>
                   </div>
 
-                  <button
-                    onClick={resetApp}
-                    className="p-2 text-gray-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all border border-gray-200"
-                    title="Scan another monument"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                  </button>
-                </div>
+                  <div>
+                    <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
+                      Built By
+                    </p>
 
-                <div className="bg-slate-50 border border-slate-100 rounded-xl p-3.5 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`p-2 rounded-lg ${
-                        isSpeaking
-                          ? "bg-rose-500 text-white animate-pulse"
-                          : "bg-gray-200 text-gray-600"
-                      }`}
-                    >
-                      <Volume2 className="w-5 h-5" />
-                    </div>
-
-                    <div>
-                      <h4 className="font-bold text-xs">
-                        Audio Guide Playback
-                      </h4>
-
-                      <p className="text-[10px] text-gray-500 font-medium">
-                        Language: {language}
-                      </p>
-
-                      {activeVoiceName && (
-                        <p
-                          className="text-[9px] text-gray-400 font-medium truncate max-w-[150px]"
-                          title={activeVoiceName}
-                        >
-                          🔊 {activeVoiceName}
-                        </p>
-                      )}
-                    </div>
+                    <p className="font-bold text-gray-800 leading-snug">
+                      {details.built_by}
+                    </p>
                   </div>
 
-                  <button
-                    onClick={
-                      isSpeaking
-                        ? stopNarration
-                        : () => speakText(narration, language)
-                    }
-                    disabled={languageLoading}
-                    className={`py-2 px-4 font-bold text-xs rounded-lg transition-all ${
-                      isSpeaking
-                        ? "bg-gray-800 text-white hover:bg-gray-900"
-                        : "bg-rose-500 text-white hover:bg-rose-600 shadow-md shadow-rose-100"
-                    }`}
-                  >
-                    {isSpeaking ? "⏹ Stop" : "▶ Listen"}
-                  </button>
-                </div>
+                  <div>
+                    <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
+                      Construction Era
+                    </p>
 
-                <div className="border-t border-gray-100 pt-4">
-                  <h4 className="font-bold text-xs text-gray-500 mb-2 uppercase tracking-wide">
-                    Historical Story
-                  </h4>
+                    <p className="font-bold text-gray-800 leading-snug">
+                      {details.construction_year}
+                    </p>
+                  </div>
 
-                  <div className="bg-slate-50/50 rounded-xl p-3.5 border border-slate-100/50">
-                    <p className="text-sm font-medium leading-relaxed text-gray-800 whitespace-pre-wrap italic">
-                      &ldquo;{narration}&rdquo;
+                  <div>
+                    <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
+                      Architectural Style
+                    </p>
+
+                    <p className="font-bold text-gray-800 leading-snug">
+                      {details.theme}
                     </p>
                   </div>
                 </div>
+
+                {Array.isArray(details.key_facts) &&
+                  details.key_facts.length > 0 && (
+                    <div className="border-t border-gray-100 pt-3 space-y-1.5">
+                      <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
+                        Key Highlights
+                      </p>
+
+                      <ul className="space-y-1.5">
+                        {details.key_facts.map(
+                          (fact: string, index: number) => (
+                            <li
+                              key={index}
+                              className="flex gap-2 text-xs font-semibold text-gray-700 leading-normal"
+                            >
+                              <span className="text-rose-500">•</span>
+
+                              <span>{fact}</span>
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    </div>
+                  )}
+
+                <button
+                  onClick={() => setActiveTab("chat")}
+                  className="w-full py-2.5 bg-gray-900 hover:bg-black text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-colors"
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  Ask Follow-up Questions
+                </button>
               </div>
+            )}
+          </div>
+        )}
 
-              {details && (
-                <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
-                  <div className="flex items-center space-x-2 border-b border-gray-100 pb-2">
-                    <Landmark className="w-4 h-4 text-rose-500" />
-                    <h3 className="font-bold text-sm text-gray-800">
-                      Historical Record
-                    </h3>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3.5 text-xs">
-                    <div>
-                      <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
-                        Location
-                      </p>
-                      <p className="font-bold text-gray-800 leading-snug">
-                        {details.location}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
-                        Built By
-                      </p>
-                      <p className="font-bold text-gray-800 leading-snug">
-                        {details.built_by}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
-                        Construction Era
-                      </p>
-                      <p className="font-bold text-gray-800 leading-snug">
-                        {details.construction_year}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
-                        Architectural Style
-                      </p>
-                      <p className="font-bold text-gray-800 leading-snug">
-                        {details.theme}
-                      </p>
-                    </div>
-                  </div>
-
-                  {Array.isArray(details.key_facts) &&
-                    details.key_facts.length > 0 && (
-                      <div className="border-t border-gray-100 pt-3 space-y-1.5">
-                        <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
-                          Key Highlights
-                        </p>
-
-                        <ul className="space-y-1.5">
-                          {details.key_facts.map(
-                            (fact: string, index: number) => (
-                              <li
-                                key={index}
-                                className="flex gap-2 text-xs font-semibold text-gray-700 leading-normal"
-                              >
-                                <span className="text-rose-500">•</span>
-                                <span>{fact}</span>
-                              </li>
-                            )
-                          )}
-                        </ul>
-                      </div>
-                    )}
-
-                  <button
-                    onClick={() => setActiveTab("chat")}
-                    className="w-full py-2.5 bg-gray-900 hover:bg-black text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-colors"
-                  >
-                    <MessageSquare className="w-4 h-4" />
-                    Ask Follow-up Questions
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === "chat" && monumentId && monumentName && (
-            <ChatWindow
-              monumentId={monumentId}
-              monumentName={monumentName}
-              monumentDetails={details}
-              language={language}
-            />
-          )}
-        </div>
+        {activeTab === "chat" && monumentId && monumentName && (
+          <ChatWindow
+            monumentId={monumentId}
+            monumentName={monumentName}
+            monumentDetails={details}
+            language={language}
+          />
+        )}
       </div>
-    </main>
-  );
-}
+    </div>
+
+    {/* Footer */}
+    <Footer />
+  </main>
+);

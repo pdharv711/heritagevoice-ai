@@ -127,7 +127,7 @@ export default function Home() {
     stopNarration();
 
     try {
-      const response = await fetch("http://localhost:8000/api/identify", {
+     const response = await fetch("https://heritagevoice-ai.onrender.com/api/identify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: base64Image, language }),

@@ -816,23 +816,13 @@ def get_monuments():
 # =============================================================================
 
 @app.post("/api/identify")
-def identify_monument(
-    request: IdentifyRequest,
-):
+def identify_monument(request: IdentifyRequest):
 
-    language = normalize_language(
-        request.language
-    )
+    language = normalize_language(request.language)
 
-    # -------------------------------------------------------------------------
-    # Decode image
-    # -------------------------------------------------------------------------
-
+    # 1. Decode image
     try:
-
-        image_bytes = clean_base64_image(
-            request.image
-        )
+        image_bytes = clean_base64_image(request.image)
 
         pil_image = Image.open(
             BytesIO(image_bytes)
@@ -841,243 +831,325 @@ def identify_monument(
         pil_image.load()
 
         if pil_image.mode != "RGB":
-
-            pil_image = pil_image.convert(
-                "RGB"
-            )
+            pil_image = pil_image.convert("RGB")
 
         max_size = 1280
 
         if max(pil_image.size) > max_size:
+            pil_image.thumbnail((max_size, max_size))
 
-            pil_image.thumbnail(
-                (max_size, max_size)
-            )
-
-        logger.info(
-            f"Image received: "
-            f"{pil_image.size[0]}x"
-            f"{pil_image.size[1]} "
-            f"| Language: {language}"
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            f"Image decoding failed: {e}"
-        )
-
+    except Exception:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Invalid image. "
-                "Please upload a valid JPG, PNG, or WEBP image."
-            ),
+            detail="Invalid image. Please upload a valid image."
         )
 
-    # -------------------------------------------------------------------------
-    # Gemini unavailable
-    # -------------------------------------------------------------------------
-
+    # 2. Gemini only identifies the monument
     if not gemini_available:
-
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Gemini AI is unavailable. "
-                "Check GEMINI_API_KEY and google-genai."
-            ),
+            detail="Gemini AI is unavailable."
         )
 
-    # -------------------------------------------------------------------------
-    # Identification prompt
-    # -------------------------------------------------------------------------
+    identification_prompt = f"""
+You are a monument recognition system.
 
-    prompt = f"""
-You are HeritageVoice AI, an expert monument and historical
-landmark recognition system.
+Look carefully at the supplied image.
 
-Analyze the supplied image carefully.
-
-Identify the monument or heritage structure visible in the image.
-
-The image may contain:
-
-- monuments
-- temples
-- mosques
-- churches
-- forts
-- palaces
-- memorials
-- statues
-- towers
-- gates
-- caves
-- archaeological sites
-- bridges
-- other historical structures
-
-Use visual evidence such as:
-
-- architecture
-- shape
-- towers
-- domes
-- arches
-- columns
-- carvings
-- materials
-- inscriptions
-- surrounding environment
-- layout
-- distinctive structural features
-
-Do NOT automatically assume the image is a famous landmark.
-
-If the exact monument cannot be identified confidently,
-return the most likely identification and use "low" confidence.
-
-Do not invent an unrelated monument.
-
-{language_instruction(language)}
+Identify the most likely monument, temple, fort,
+palace, memorial, tower, archaeological site,
+church, mosque, gate, bridge, statue or other
+historical structure.
 
 Return ONLY valid JSON.
 
-The narration field MUST contain a 70-110 word tour-guide
-style narration written entirely in {language}.
+{
+    "name": "exact monument name",
+    "confidence": "high"
+}
 
-JSON structure:
+Rules:
 
-{{
-    "name": "specific monument name",
-    "location": "city, state, country if known",
-    "built_by": "ruler, dynasty, architect or organization if known",
-    "year": "construction date or period",
-    "architectural_style": "architectural style",
-    "key_facts": [
-        "important fact 1",
-        "important fact 2",
-        "important fact 3"
-    ],
-    "description": "short accurate description",
-    "confidence": "high",
-    "narration": "70-110 word narration in {language}"
-}}
-
-IMPORTANT:
-
-The narration MUST be in {language}.
-
-Do not return the narration in English if another language
-was selected.
-
-Do not add markdown.
-
-Do not add ```json.
-
-Return JSON only.
+- Do not invent a monument.
+- If you cannot identify it, use "Unknown Monument".
+- Return only JSON.
 """
-
-    # -------------------------------------------------------------------------
-    # Gemini Vision
-    # -------------------------------------------------------------------------
 
     try:
 
         raw_response = gemini_vision(
             pil_image,
-            prompt,
+            identification_prompt
         )
 
-        result = extract_json(
+        result = extract_json(raw_response)
+
+        if not result:
+            raise RuntimeError(
+                "Invalid Gemini identification response."
+            )
+
+        identified_name = str(
+            result.get("name", "")
+        ).strip()
+
+        confidence = str(
+            result.get("confidence", "low")
+        ).lower()
+
+    except GeminiQuotaError as e:
+
+        raise HTTPException(
+            status_code=429,
+            detail="Gemini AI quota is temporarily exhausted."
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            f"Identification failed: {e}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not identify the monument."
+        )
+
+    # ============================================================
+    # 3. SEARCH DATABASE FIRST
+    # ============================================================
+
+    catalog_id = database.search_monument(
+        identified_name
+    )
+
+    if catalog_id:
+
+        catalog_info = database.get_monument_by_id(
+            catalog_id
+        )
+
+        if catalog_info:
+
+            name = catalog_info.get(
+                "canonical_name",
+                identified_name
+            )
+
+            details = {
+                "canonical_name": name,
+                "location": catalog_info.get(
+                    "location",
+                    "Unknown"
+                ),
+                "built_by": catalog_info.get(
+                    "built_by",
+                    "Unknown"
+                ),
+                "construction_year": catalog_info.get(
+                    "construction_year",
+                    "Unknown"
+                ),
+                "theme": catalog_info.get(
+                    "theme",
+                    "Unknown"
+                ),
+                "key_facts": catalog_info.get(
+                    "key_facts",
+                    []
+                ),
+                "detailed_context": catalog_info.get(
+                    "detailed_context",
+                    ""
+                ),
+            }
+
+            # Generate narration using DATABASE facts
+            narration_prompt = f"""
+You are HeritageVoice AI,
+a professional historical tour guide.
+
+{language_instruction(language)}
+
+Create a natural 70-110 word narration.
+
+Use ONLY the following verified
+monument information:
+
+Monument:
+{name}
+
+Location:
+{details["location"]}
+
+Built by:
+{details["built_by"]}
+
+Construction:
+{details["construction_year"]}
+
+Architectural style:
+{details["theme"]}
+
+Historical context:
+{details["detailed_context"]}
+
+Key facts:
+{details["key_facts"]}
+
+Rules:
+
+- Entire narration must be in {language}.
+- Do not mix languages.
+- Do not invent facts.
+- Do not use markdown.
+- Return ONLY narration.
+"""
+
+            try:
+                narration = gemini_text(
+                    narration_prompt
+                )
+
+            except GeminiQuotaError:
+
+                narration = mock_narration(
+                    details,
+                    language
+                )
+
+            logger.info(
+                f"KNOWN MONUMENT: {name} "
+                f"| Database ID: {catalog_id}"
+            )
+
+            return {
+                "monument_id": catalog_id,
+                "canonical_name": name,
+                "location": details["location"],
+                "built_by": details["built_by"],
+                "construction_year": details["construction_year"],
+                "theme": details["theme"],
+                "key_facts": details["key_facts"],
+                "details": details,
+                "narration": narration,
+                "language": language,
+                "confidence": confidence,
+                "mode": "database",
+                "dynamic": False,
+            }
+
+    # ============================================================
+    # 4. NOT IN DATABASE → GEMINI FALLBACK
+    # ============================================================
+
+    logger.info(
+        f"Monument '{identified_name}' not found "
+        f"in database. Using Gemini AI."
+    )
+
+    ai_prompt = f"""
+You are HeritageVoice AI,
+an expert historical monument researcher.
+
+Analyze the supplied image carefully.
+
+The initial visual identification was:
+
+{identified_name}
+
+Now determine the monument's
+historical information.
+
+Return ONLY valid JSON.
+
+{{
+    "name": "monument name",
+    "location": "city, state, country if known",
+    "built_by": "ruler, dynasty, architect or organization if known",
+    "year": "construction date or period",
+    "architectural_style": "architectural style",
+    "key_facts": [
+        "fact 1",
+        "fact 2",
+        "fact 3"
+    ],
+    "description": "accurate historical description",
+    "confidence": "high"
+}}
+
+Rules:
+
+- Be historically accurate.
+- Do not invent facts.
+- If information is uncertain, say Unknown.
+"""
+
+    try:
+
+        raw_response = gemini_vision(
+            pil_image,
+            ai_prompt
+        )
+
+        ai_result = extract_json(
             raw_response
         )
 
-        if not result:
-
-            logger.error(
-                f"Could not parse Gemini JSON: {raw_response}"
-            )
-
+        if not ai_result:
             raise RuntimeError(
-                "Gemini returned invalid identification JSON."
+                "Gemini returned invalid monument data."
             )
-
-        # -------------------------------------------------------------
-        # Normalize fields
-        # -------------------------------------------------------------
 
         name = str(
-            result.get(
+            ai_result.get(
                 "name",
-                "Unknown Monument",
+                identified_name
             )
         ).strip()
 
         location = str(
-            result.get(
+            ai_result.get(
                 "location",
-                "Unknown",
+                "Unknown"
             )
         ).strip()
 
         built_by = str(
-            result.get(
+            ai_result.get(
                 "built_by",
-                "Unknown",
+                "Unknown"
             )
         ).strip()
 
         year = str(
-            result.get(
+            ai_result.get(
                 "year",
-                "Unknown",
+                "Unknown"
             )
         ).strip()
 
         architectural_style = str(
-            result.get(
+            ai_result.get(
                 "architectural_style",
-                "Unknown",
+                "Unknown"
             )
         ).strip()
 
         description = str(
-            result.get(
+            ai_result.get(
                 "description",
-                "",
+                ""
             )
         ).strip()
 
-        confidence = str(
-            result.get(
-                "confidence",
-                "low",
-            )
-        ).lower().strip()
-
-        if confidence not in {
-            "high",
-            "medium",
-            "low",
-        }:
-
-            confidence = "low"
-
-        key_facts = result.get(
+        key_facts = ai_result.get(
             "key_facts",
-            [],
+            []
         )
 
-        if not isinstance(
-            key_facts,
-            list,
-        ):
-
-            key_facts = [
-                str(key_facts)
-            ]
+        if not isinstance(key_facts, list):
+            key_facts = [str(key_facts)]
 
         key_facts = [
             str(fact).strip()
@@ -1085,109 +1157,54 @@ Return JSON only.
             if str(fact).strip()
         ]
 
-        narration = str(
-            result.get(
-                "narration",
-                "",
+        ai_confidence = str(
+            ai_result.get(
+                "confidence",
+                confidence
             )
-        ).strip()
+        ).lower()
 
-        # -------------------------------------------------------------
-        # Search local catalog for stronger grounding
-        # -------------------------------------------------------------
+        if ai_confidence not in {
+            "high",
+            "medium",
+            "low"
+        }:
+            ai_confidence = "low"
 
-        catalog_id = database.search_monument(
+        monument_id = unique_dynamic_monument_id(
             name
         )
 
-        catalog_info = None
+        register_dynamic_monument(
+            monument_id=monument_id,
+            name=name,
+            location=location,
+            built_by=built_by,
+            year=year,
+            architectural_style=architectural_style,
+            key_facts=key_facts,
+            description=description,
+            confidence=ai_confidence,
+        )
 
-        if catalog_id:
+        details = {
+            "canonical_name": name,
+            "location": location,
+            "built_by": built_by,
+            "construction_year": year,
+            "theme": architectural_style,
+            "key_facts": key_facts,
+            "detailed_context": description,
+        }
 
-            catalog_info = database.get_monument_by_id(
-                catalog_id
-            )
-
-        # -------------------------------------------------------------
-        # If catalog has the monument, use catalog facts
-        # -------------------------------------------------------------
-
-        if catalog_info:
-
-            name = catalog_info.get(
-                "canonical_name",
-                name,
-            )
-
-            location = catalog_info.get(
-                "location",
-                location,
-            )
-
-            built_by = catalog_info.get(
-                "built_by",
-                built_by,
-            )
-
-            year = catalog_info.get(
-                "construction_year",
-                year,
-            )
-
-            architectural_style = catalog_info.get(
-                "theme",
-                architectural_style,
-            )
-
-            if catalog_info.get(
-                "key_facts"
-            ):
-
-                key_facts = catalog_info[
-                    "key_facts"
-                ]
-
-            description = catalog_info.get(
-                "detailed_context",
-                description,
-            )
-
-        # -------------------------------------------------------------
-        # Dynamic ID
-        # -------------------------------------------------------------
-
-        if catalog_id:
-
-            monument_id = catalog_id
-
-        else:
-
-            monument_id = unique_dynamic_monument_id(name)
-
-            register_dynamic_monument(
-                monument_id=monument_id,
-                name=name,
-                location=location,
-                built_by=built_by,
-                year=year,
-                architectural_style=architectural_style,
-                key_facts=key_facts,
-                description=description,
-                confidence=confidence,
-            )
-
-        # -------------------------------------------------------------
-        # If narration is missing, generate it separately
-        # -------------------------------------------------------------
-
-        if not narration:
-
-            narration_prompt = f"""
-You are a professional multilingual heritage tour guide.
+        # Generate narration
+        narration_prompt = f"""
+You are HeritageVoice AI,
+a friendly multilingual historical tour guide.
 
 {language_instruction(language)}
 
-Create a natural 70-110 word narration about this monument.
+Create a natural 70-110 word narration.
 
 Monument:
 {name}
@@ -1207,97 +1224,60 @@ Architectural style:
 Description:
 {description}
 
-Facts:
+Key facts:
 {key_facts}
 
-The narration MUST be entirely in {language}.
+Rules:
 
-Return ONLY the narration.
-
-Do not use headings.
-Do not use markdown.
-Do not explain your process.
+- Entire narration must be in {language}.
+- Do not mix languages.
+- Do not invent unsupported facts.
+- No markdown.
+- Return ONLY narration.
 """
 
-            try:
-                narration = gemini_text(
-                    narration_prompt
-                )
-            except GeminiQuotaError as e:
-                logger.warning(
-                    f"Using fallback narration because Gemini quota is exhausted: {e}"
-                )
-                narration = mock_narration(
-                    {
-                        "canonical_name": name,
-                        "location": location,
-                        "built_by": built_by,
-                        "construction_year": year,
-                        "key_facts": key_facts,
-                    },
-                    language,
-                )
-
-        logger.info(
-            f"Monument identified: {name} "
-            f"| ID: {monument_id} "
-            f"| Confidence: {confidence} "
-            f"| Language: {language}"
-        )
+        try:
+            narration = gemini_text(
+                narration_prompt
+            )
+        except GeminiQuotaError:
+            narration = mock_narration(
+                details,
+                language
+            )
 
         return {
-
             "monument_id": monument_id,
-
-            "name": name,
-
             "canonical_name": name,
-
             "location": location,
-
             "built_by": built_by,
-
             "construction_year": year,
-
             "theme": architectural_style,
-
-            "architectural_style": architectural_style,
-
             "key_facts": key_facts,
-
-            "description": description,
-
-            "confidence": confidence,
-
+            "details": details,
             "narration": narration,
-
             "language": language,
-
-            "mode": "live_ai",
-            "dynamic": not bool(catalog_id),
+            "confidence": ai_confidence,
+            "mode": "gemini",
+            "dynamic": True,
         }
 
-    except GeminiQuotaError as e:
+    except GeminiQuotaError:
 
-        logger.warning(f"Monument identification blocked by Gemini quota: {e}")
         raise HTTPException(
             status_code=429,
-            detail=(
-                "The AI service has temporarily reached its Gemini quota. "
-                "Please wait a short while and try again. Your image and application are working correctly."
-            ),
-            headers={"Retry-After": str(_quota_retry_seconds(str(e)))},
+            detail="Gemini AI quota is temporarily exhausted."
         )
 
     except Exception as e:
 
-        logger.exception(f"Monument identification failed: {e}")
+        logger.exception(
+            f"Gemini fallback failed: {e}"
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Monument identification failed. "
-                "Please try again. The image or AI response could not be processed."
-            ),
+            detail="Could not process this monument."
         )
 
 

@@ -1,19 +1,19 @@
 import base64
-import binascii
 import json
 import logging
-import os
 import re
+import wave
 from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 import config
 import database
+
 
 # =============================================================================
 # GOOGLE GEMINI SDK
@@ -25,9 +25,8 @@ try:
 
     NEW_SDK = True
 except ImportError:
-    genai = None
-    genai_types = None
     NEW_SDK = False
+
 
 # =============================================================================
 # LOGGING
@@ -37,17 +36,20 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger("heritagevoice")
+
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
-# FASTAPI
+# FASTAPI APPLICATION
 # =============================================================================
 
 app = FastAPI(
     title="HeritageVoice AI API",
-    description="Multilingual AI-powered Heritage Tour Guide",
-    version="5.1.0",
+    description="Multilingual AI Tour Guide — Monument Recognition",
+    version="5.0.0",
 )
+
 
 # =============================================================================
 # CORS
@@ -61,36 +63,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # =============================================================================
 # GEMINI CONFIGURATION
 # =============================================================================
 
+# Current stable Gemini Flash model.
+GEMINI_MODEL = "gemini-3.7-flash"
+
+# Gemini TTS model.
+GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+
 gemini_client = None
 gemini_available = False
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 if config.GEMINI_API_KEY and NEW_SDK:
     try:
-        gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
+        gemini_client = genai.Client(
+            api_key=config.GEMINI_API_KEY
+        )
+
         gemini_available = True
+
         logger.info(
-            "Gemini client initialized successfully. Model: %s",
+            "Gemini client ready. Model=%s",
             GEMINI_MODEL,
         )
-    except Exception as exc:
-        logger.exception("Gemini initialization failed: %s", exc)
+
+    except Exception:
+        logger.exception("Gemini initialization failed")
+
+elif not NEW_SDK:
+    logger.error(
+        "google-genai is not installed. "
+        "Add google-genai to requirements.txt."
+    )
+
 else:
-    if not NEW_SDK:
-        logger.error("google-genai package is not installed.")
-    if not config.GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY is missing.")
+    logger.warning(
+        "GEMINI_API_KEY is not configured. "
+        "Backend will run without Gemini."
+    )
+
 
 # =============================================================================
-# LANGUAGES
+# SUPPORTED LANGUAGES
 # =============================================================================
 
-SUPPORTED_LANGUAGES = {
+SUPPORTED_LANGUAGES = [
     "English",
     "Hindi",
     "Tamil",
@@ -109,176 +130,336 @@ SUPPORTED_LANGUAGES = {
     "Portuguese",
     "Russian",
     "Italian",
-}
+]
 
-LANGUAGE_NATIVE_NAMES = {
-    "English": "English",
-    "Hindi": "Hindi (हिन्दी)",
-    "Tamil": "Tamil (தமிழ்)",
-    "Telugu": "Telugu (తెలుగు)",
-    "Bengali": "Bengali (বাংলা)",
-    "Marathi": "Marathi (मराठी)",
-    "Gujarati": "Gujarati (ગુજરાતી)",
-    "Kannada": "Kannada (ಕನ್ನಡ)",
-    "Punjabi": "Punjabi (ਪੰਜਾਬੀ)",
-    "French": "French (Français)",
-    "Spanish": "Spanish (Español)",
-    "German": "German (Deutsch)",
-    "Arabic": "Arabic (العربية)",
-    "Japanese": "Japanese (日本語)",
-    "Korean": "Korean (한국어)",
-    "Portuguese": "Portuguese (Português)",
-    "Russian": "Russian (Русский)",
-    "Italian": "Italian (Italiano)",
-}
-
-
-def normalize_language(language: str) -> str:
-    if not language:
-        return "English"
-
-    value = str(language).strip()
-
-    for supported in SUPPORTED_LANGUAGES:
-        if supported.lower() == value.lower():
-            return supported
-
-    logger.warning("Unsupported language '%s'. Using English.", value)
-    return "English"
-
-
-def language_instruction(language: str) -> str:
-    language = normalize_language(language)
-    native_name = LANGUAGE_NATIVE_NAMES.get(language, language)
-
-    return f"""
-LANGUAGE REQUIREMENT - VERY IMPORTANT
-
-The visitor selected: {native_name}
-
-Your response MUST be written entirely in {language}.
-Do NOT answer in English unless the selected language is English.
-Do NOT mix languages.
-Proper names of monuments, people and places may remain in their
-internationally recognized form when necessary.
-
-All explanatory sentences MUST be in {language}.
-Selected language: {language}
-"""
 
 # =============================================================================
-# REQUEST MODELS
+# LANGUAGE CODES
+# =============================================================================
+
+LANGUAGE_CODES = {
+    "English": "en-US",
+    "Hindi": "hi-IN",
+    "Tamil": "ta-IN",
+    "Telugu": "te-IN",
+    "Bengali": "bn-IN",
+    "Marathi": "mr-IN",
+    "Gujarati": "gu-IN",
+    "Kannada": "kn-IN",
+    "Punjabi": "pa-IN",
+    "French": "fr-FR",
+    "Spanish": "es-ES",
+    "German": "de-DE",
+    "Arabic": "ar-SA",
+    "Japanese": "ja-JP",
+    "Korean": "ko-KR",
+    "Portuguese": "pt-BR",
+    "Russian": "ru-RU",
+    "Italian": "it-IT",
+}
+
+
+# =============================================================================
+# FALLBACK NARRATIONS
+# =============================================================================
+
+MOCK_NARRATIONS: Dict[str, str] = {
+
+    "English":
+        "Welcome to {name}! Located in {location}, "
+        "this historical monument was built by {built_by} "
+        "around {construction}. A key highlight is {key_fact}.",
+
+    "Hindi":
+        "{name} में आपका स्वागत है। यह ऐतिहासिक स्मारक "
+        "{location} में स्थित है। इसे {built_by} द्वारा "
+        "{construction} के आसपास बनाया गया था। "
+        "इसकी एक प्रमुख विशेषता है: {key_fact}.",
+
+    "Gujarati":
+        "{name} માં આપનું સ્વાગત છે. આ ઐતિહાસિક સ્મારક "
+        "{location} માં આવેલું છે. તેનું નિર્માણ {built_by} "
+        "દ્વારા {construction} ની આસપાસ કરવામાં આવ્યું હતું. "
+        "તેની એક મહત્વપૂર્ણ વિશેષતા છે: {key_fact}.",
+
+    "Tamil":
+        "{name}-க்கு வரவேற்கிறோம். இந்த வரலாற்றுச் சின்னம் "
+        "{location}-ல் அமைந்துள்ளது. இது {built_by} அவர்களால் "
+        "{construction} காலத்தில் கட்டப்பட்டது. "
+        "இதன் முக்கிய அம்சம்: {key_fact}.",
+
+    "Telugu":
+        "{name} కు స్వాగతం. ఈ చారిత్రక కట్టడం "
+        "{location}లో ఉంది. దీనిని {built_by} వారు "
+        "{construction} కాలంలో నిర్మించారు. "
+        "ముఖ్యమైన విషయం: {key_fact}.",
+
+    "Bengali":
+        "{name}-এ আপনাকে স্বাগত। এই ঐতিহাসিক স্থাপনাটি "
+        "{location}-এ অবস্থিত। এটি {built_by} দ্বারা "
+        "{construction} সময়ে নির্মিত হয়েছিল। "
+        "গুরুত্বপূর্ণ তথ্য হলো: {key_fact}.",
+
+    "Marathi":
+        "{name} मध्ये आपले स्वागत आहे. हे ऐतिहासिक स्मारक "
+        "{location} येथे आहे. हे {built_by} यांनी "
+        "{construction} च्या सुमारास बांधले. "
+        "महत्त्वाची माहिती: {key_fact}.",
+
+    "Kannada":
+        "{name} ಗೆ ಸ್ವಾಗತ. ಈ ಐತಿಹಾಸಿಕ ಸ್ಮಾರಕವು "
+        "{location} ನಲ್ಲಿ ಇದೆ. ಇದನ್ನು {built_by} ಅವರು "
+        "{construction} ರಲ್ಲಿ ನಿರ್ಮಿಸಿದರು. "
+        "ಪ್ರಮುಖ ಮಾಹಿತಿ: {key_fact}.",
+
+    "Punjabi":
+        "{name} ਵਿੱਚ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ। ਇਹ ਇਤਿਹਾਸਕ ਸਮਾਰਕ "
+        "{location} ਵਿੱਚ ਸਥਿਤ ਹੈ। ਇਸਨੂੰ {built_by} ਦੁਆਰਾ "
+        "{construction} ਦੇ ਆਸ-ਪਾਸ ਬਣਾਇਆ ਗਿਆ ਸੀ। "
+        "ਮੁੱਖ ਤੱਥ: {key_fact}.",
+
+    "French":
+        "Bienvenue à {name}! Situé à {location}, "
+        "ce monument historique a été construit par "
+        "{built_by} vers {construction}. "
+        "Un fait important est : {key_fact}.",
+
+    "Spanish":
+        "¡Bienvenido a {name}! Situado en {location}, "
+        "este monumento histórico fue construido por "
+        "{built_by} alrededor de {construction}. "
+        "Un dato importante es: {key_fact}.",
+
+    "German":
+        "Willkommen bei {name}! Dieses historische Monument "
+        "befindet sich in {location} und wurde von "
+        "{built_by} um {construction} errichtet. "
+        "Eine wichtige Tatsache ist: {key_fact}.",
+
+    "Arabic":
+        "مرحباً بكم في {name}! يقع هذا المعلم التاريخي في "
+        "{location} وقد بناه {built_by} حوالي {construction}. "
+        "ومن أهم الحقائق عنه: {key_fact}.",
+
+    "Japanese":
+        "{name}へようこそ。この歴史的建造物は{location}にあり、"
+        "{built_by}によって{construction}頃に建設されました。"
+        "重要な特徴は{key_fact}です。",
+
+    "Korean":
+        "{name}에 오신 것을 환영합니다. 이 역사적인 기념물은 "
+        "{location}에 있으며 {built_by}가 {construction}경에 "
+        "건설했습니다. 중요한 사실은 {key_fact}입니다.",
+
+    "Portuguese":
+        "Bem-vindo a {name}! Localizado em {location}, "
+        "este monumento histórico foi construído por "
+        "{built_by} por volta de {construction}. "
+        "Um fato importante é: {key_fact}.",
+
+    "Russian":
+        "Добро пожаловать в {name}! Этот исторический памятник "
+        "находится в {location} и был построен {built_by} "
+        "примерно в {construction}. Важный факт: {key_fact}.",
+
+    "Italian":
+        "Benvenuti a {name}! Situato a {location}, "
+        "questo monumento storico fu costruito da "
+        "{built_by} intorno a {construction}. "
+        "Un fatto importante è: {key_fact}.",
+}
+
+
+# =============================================================================
+# PYDANTIC MODELS
 # =============================================================================
 
 class IdentifyRequest(BaseModel):
-    image: str = Field(..., description="Base64 encoded image or data URI")
-    language: str = "English"
+    image: str = Field(
+        ...,
+        description="Base64 encoded image or data URI",
+    )
+
+    language: str = Field(
+        "English",
+        description="Requested narration language",
+    )
+
+
+class NarrationRequest(BaseModel):
+    monument_name: str
+
+    language: str = Field(
+        "English"
+    )
+
+    details: Dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+
+class TTSRequest(BaseModel):
+    text: str
+
+    language: str = Field(
+        "English"
+    )
 
 
 class ChatMessage(BaseModel):
-    role: str = "user"
+    role: str = Field(
+        "user"
+    )
+
     content: str
 
 
 class ChatRequest(BaseModel):
     monument_id: str
-    question: str
-    language: str = "English"
-    history: List[ChatMessage] = Field(default_factory=list)
 
-    # Frontend may send either field.
-    details: Optional[Dict[str, Any]] = None
+    monument_name: Optional[str] = None
+
     monument_details: Optional[Dict[str, Any]] = None
 
+    question: str
 
-class NarrationRequest(BaseModel):
-    monument_name: str
-    language: str = "English"
-    details: Dict[str, Any] = Field(default_factory=dict)
+    language: str = Field(
+        "English"
+    )
+
+    history: List[ChatMessage] = Field(
+        default_factory=list
+    )
+
 
 # =============================================================================
-# IMAGE DECODING
+# GEMINI STRUCTURED OUTPUT SCHEMA
 # =============================================================================
+
+IDENTIFICATION_SCHEMA = {
+    "type": "object",
+
+    "properties": {
+
+        "name": {
+            "type": "string"
+        },
+
+        "location": {
+            "type": "string"
+        },
+
+        "built_by": {
+            "type": "string"
+        },
+
+        "year": {
+            "type": "string"
+        },
+
+        "architectural_style": {
+            "type": "string"
+        },
+
+        "key_facts": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+
+        "description": {
+            "type": "string"
+        },
+
+        "confidence": {
+            "type": "string",
+            "enum": [
+                "high",
+                "medium",
+                "low"
+            ]
+        },
+
+        "narration": {
+            "type": "string"
+        },
+    },
+
+    "required": [
+        "name",
+        "location",
+        "built_by",
+        "year",
+        "architectural_style",
+        "key_facts",
+        "description",
+        "confidence",
+        "narration",
+    ],
+}
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def normalize_language(language: str) -> str:
+    """
+    Make sure only supported languages are used.
+    """
+
+    if language in SUPPORTED_LANGUAGES:
+        return language
+
+    return "English"
+
 
 def clean_base64_image(value: str) -> bytes:
     """
-    Accept:
+    Decode Base64 image data.
+    Supports:
       data:image/jpeg;base64,...
-      data:image/jpg;base64,...
       data:image/png;base64,...
-      data:image/webp;base64,...
-      raw base64
-
-    Browser whitespace/newlines are removed.
+      raw Base64
     """
 
     if not value:
-        raise ValueError("Image data is empty.")
+        raise ValueError("Empty image")
 
-    value = str(value).strip()
+    value = value.strip()
 
-    # Data URI
-    if value.lower().startswith("data:"):
-        match = re.match(
-            r"^data:image/(?:jpeg|jpg|png|webp);base64,(.*)$",
+    if "," in value:
+        value = value.split(",", 1)[1]
+
+    value = re.sub(
+        r"\s+",
+        "",
+        value,
+    )
+
+    value += "=" * (
+        -len(value) % 4
+    )
+
+    try:
+        return base64.b64decode(
             value,
-            flags=re.IGNORECASE | re.DOTALL,
+            validate=False,
         )
 
-        if not match:
-            raise ValueError(
-                "Unsupported image data URI. "
-                "Only JPG, PNG and WEBP are supported."
-            )
+    except Exception as exc:
 
-        value = match.group(1)
+        raise ValueError(
+            "Invalid Base64 image"
+        ) from exc
 
-    # Remove whitespace introduced by browser/base64 formatting.
-    value = re.sub(r"\s+", "", value)
-
-    if not value:
-        raise ValueError("Image base64 data is empty.")
-
-    # Fix missing padding.
-    value += "=" * (-len(value) % 4)
-
-    try:
-        image_bytes = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError(f"Invalid base64 image: {exc}") from exc
-
-    if not image_bytes:
-        raise ValueError("Decoded image is empty.")
-
-    return image_bytes
-
-
-def decode_image(value: str) -> Image.Image:
-    image_bytes = clean_base64_image(value)
-
-    try:
-        image = Image.open(BytesIO(image_bytes))
-        image.load()
-    except (UnidentifiedImageError, OSError) as exc:
-        raise ValueError(f"Image could not be opened: {exc}") from exc
-
-    # Gemini receives a standard RGB JPEG.
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-
-    # Keep requests reasonably small.
-    max_size = 1280
-    if max(image.size) > max_size:
-        image.thumbnail((max_size, max_size))
-
-    logger.info("Image decoded successfully: %sx%s", image.width, image.height)
-    return image
-
-# =============================================================================
-# JSON HELPERS
-# =============================================================================
 
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Safely extract JSON from Gemini response.
+    """
+
     if not text:
         return None
 
@@ -286,333 +467,310 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
 
     # Direct JSON
     try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
+
+        result = json.loads(text)
+
+        if isinstance(result, dict):
+            return result
+
     except Exception:
         pass
 
-    # ```json ... ```
+    # Markdown JSON
     match = re.search(
-        r"```json\s*(.*?)\s*```",
+        r"```(?:json)?\s*(\{.*?\})\s*```",
         text,
-        flags=re.DOTALL | re.IGNORECASE,
+        re.DOTALL | re.IGNORECASE,
     )
+
     if match:
+
         try:
-            parsed = json.loads(match.group(1))
-            if isinstance(parsed, dict):
-                return parsed
+
+            result = json.loads(
+                match.group(1)
+            )
+
+            if isinstance(result, dict):
+                return result
+
         except Exception:
             pass
 
-    # ``` ... ```
-    match = re.search(
-        r"```\s*(.*?)\s*```",
-        text,
-        flags=re.DOTALL,
-    )
-    if match:
-        try:
-            parsed = json.loads(match.group(1))
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-
-    # JSON object embedded in text
+    # First { to last }
     start = text.find("{")
     end = text.rfind("}")
-    if start != -1 and end > start:
+
+    if start >= 0 and end > start:
+
         try:
-            parsed = json.loads(text[start:end + 1])
-            if isinstance(parsed, dict):
-                return parsed
+
+            result = json.loads(
+                text[start:end + 1]
+            )
+
+            if isinstance(result, dict):
+                return result
+
         except Exception:
             pass
 
     return None
 
-# =============================================================================
-# GEMINI HELPERS
-# =============================================================================
-
-def ensure_gemini_available() -> None:
-    if not NEW_SDK:
-        raise RuntimeError("google-genai package is not installed.")
-
-    if not gemini_client:
-        raise RuntimeError(
-            "Gemini client is not initialized. Check GEMINI_API_KEY."
-        )
-
 
 def gemini_text(prompt: str) -> str:
-    ensure_gemini_available()
+
+    if not gemini_client:
+
+        raise RuntimeError(
+            "Gemini client unavailable"
+        )
 
     response = gemini_client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
     )
 
-    text = getattr(response, "text", None)
-
-    if not text:
-        raise RuntimeError("Gemini returned an empty response.")
-
-    return text.strip()
+    return (
+        response.text or ""
+    ).strip()
 
 
-def gemini_vision(image: Image.Image, prompt: str) -> str:
-    ensure_gemini_available()
+def gemini_vision_json(
+    image: Image.Image,
+    prompt: str,
+) -> Dict[str, Any]:
 
-    image_buffer = BytesIO()
-    image.save(image_buffer, format="JPEG", quality=90)
+    if not gemini_client:
+
+        raise RuntimeError(
+            "Gemini client unavailable"
+        )
+
+    buffer = BytesIO()
+
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=88,
+        optimize=True,
+    )
 
     image_part = genai_types.Part.from_bytes(
-        data=image_buffer.getvalue(),
+        data=buffer.getvalue(),
         mime_type="image/jpeg",
     )
 
-    text_part = genai_types.Part.from_text(text=prompt)
-
     response = gemini_client.models.generate_content(
+
         model=GEMINI_MODEL,
+
         contents=[
             genai_types.Content(
                 role="user",
-                parts=[image_part, text_part],
+                parts=[
+                    image_part,
+                    genai_types.Part.from_text(
+                        text=prompt
+                    ),
+                ],
             )
         ],
+
+        config=genai_types.GenerateContentConfig(
+
+            response_mime_type="application/json",
+
+            response_schema=IDENTIFICATION_SCHEMA,
+        ),
     )
 
-    text = getattr(response, "text", None)
+    parsed = extract_json(
+        response.text or ""
+    )
 
-    if not text:
-        raise RuntimeError("Gemini Vision returned an empty response.")
+    if not parsed:
 
-    return text.strip()
+        raise ValueError(
+            "Gemini returned invalid identification JSON"
+        )
 
-# =============================================================================
-# MONUMENT / DETAIL HELPERS
-# =============================================================================
-
-DYNAMIC_MONUMENTS: Dict[str, Dict[str, Any]] = {}
-
-
-def make_dynamic_monument_id(name: str) -> str:
-    monument_id = re.sub(
-        r"[^a-z0-9]+",
-        "_",
-        str(name).lower(),
-    ).strip("_")
-
-    return monument_id[:60] or "unknown_monument"
+    return parsed
 
 
-def normalize_key_facts(facts: Any) -> List[str]:
-    if facts is None:
-        return []
+def mock_narration(
+    info: Dict[str, Any],
+    language: str,
+) -> str:
 
-    if not isinstance(facts, list):
-        facts = [facts]
+    language = normalize_language(
+        language
+    )
 
-    return [
-        str(fact).strip()
-        for fact in facts[:5]
-        if str(fact).strip()
+    template = MOCK_NARRATIONS.get(
+        language,
+        MOCK_NARRATIONS["English"],
+    )
+
+    facts = info.get(
+        "key_facts"
+    ) or [
+        "a remarkable historical site."
     ]
 
+    if not isinstance(
+        facts,
+        list,
+    ):
 
-def build_details(
-    name: str,
-    location: str,
-    built_by: str,
-    year: str,
-    architectural_style: str,
-    description: str,
-    key_facts: List[str],
-) -> Dict[str, Any]:
-    return {
-        "canonical_name": name,
-        "location": location,
-        "built_by": built_by,
-        "construction_year": year,
-        "theme": architectural_style,
-        "architectural_style": architectural_style,
-        "key_facts": key_facts,
-        "detailed_context": description,
-        "description": description,
-    }
+        facts = [
+            str(facts)
+        ]
 
+    return template.format(
 
-def register_dynamic_monument(monument_id: str, details: Dict[str, Any]) -> None:
-    DYNAMIC_MONUMENTS[monument_id] = details
+        name=(
+            info.get("canonical_name")
+            or info.get("name")
+            or "this monument"
+        ),
 
+        location=(
+            info.get("location")
+            or "an unknown location"
+        ),
 
-def get_runtime_monument(monument_id: str) -> Optional[Dict[str, Any]]:
-    if not monument_id:
-        return None
+        built_by=(
+            info.get("built_by")
+            or "unknown builders"
+        ),
 
-    catalog_info = database.get_monument_by_id(monument_id)
-    if catalog_info:
-        return catalog_info
+        construction=(
+            info.get("construction_year")
+            or info.get("year")
+            or "an unknown period"
+        ),
 
-    return DYNAMIC_MONUMENTS.get(monument_id)
-
-# =============================================================================
-# NARRATION
-# =============================================================================
-
-def fallback_narration(details: Dict[str, Any], language: str) -> str:
-    """
-    Offline emergency narration.
-    Gemini is preferred whenever available.
-    """
-
-    language = normalize_language(language)
-
-    name = details.get("canonical_name", "this monument")
-    location = details.get("location", "an unknown location")
-    built_by = details.get("built_by", "unknown builders")
-    construction = details.get("construction_year", "an unknown period")
-
-    facts = details.get("key_facts", [])
-    fact = (
-        facts[0]
-        if isinstance(facts, list) and facts
-        else "This is an important heritage site."
+        key_fact=str(
+            facts[0]
+        ),
     )
 
-    templates = {
-        "English": (
-            f"Welcome to {name}. This historic monument is located in "
-            f"{location}. It was built by {built_by} around {construction}. "
-            f"One important fact is {fact}."
-        ),
-        "Hindi": (
-            f"{name} में आपका स्वागत है। यह ऐतिहासिक स्मारक {location} में "
-            f"स्थित है। इसे {built_by} ने {construction} के आसपास बनवाया था। "
-            f"एक महत्वपूर्ण तथ्य है: {fact}"
-        ),
-        "Gujarati": (
-            f"{name} માં આપનું સ્વાગત છે. આ ઐતિહાસિક સ્મારક {location} માં "
-            f"આવેલું છે. તેને {built_by} એ {construction} દરમિયાન બનાવ્યું હતું. "
-            f"મહત્વપૂર્ણ માહિતી: {fact}"
-        ),
-        "Marathi": (
-            f"{name} मध्ये आपले स्वागत आहे. हे ऐतिहासिक स्मारक {location} "
-            f"येथे आहे. हे {built_by} यांनी {construction} च्या सुमारास बांधले. "
-            f"महत्त्वाची माहिती: {fact}"
-        ),
-        "Tamil": (
-            f"{name}க்கு வரவேற்கிறோம். இந்த வரலாற்றுச் சிறப்பு மிக்க நினைவுச்சின்னம் "
-            f"{location} பகுதியில் அமைந்துள்ளது. இது {built_by} அவர்களால் "
-            f"{construction} காலத்தில் கட்டப்பட்டது. முக்கியமான தகவல்: {fact}"
-        ),
-        "Telugu": (
-            f"{name}కు స్వాగతం. ఈ చారిత్రక స్మారకం {location}లో ఉంది. "
-            f"దీనిని {built_by} వారు {construction} సమయంలో నిర్మించారు. "
-            f"ముఖ్యమైన విషయం: {fact}"
-        ),
-        "Bengali": (
-            f"{name}-এ আপনাকে স্বাগত। এই ঐতিহাসিক স্মৃতিস্তম্ভটি {location}-এ "
-            f"অবস্থিত। এটি {built_by} দ্বারা {construction} সময়ে নির্মিত হয়েছিল। "
-            f"একটি গুরুত্বপূর্ণ তথ্য হলো: {fact}"
-        ),
-        "Kannada": (
-            f"{name}ಗೆ ಸ್ವಾಗತ. ಈ ಐತಿಹಾಸಿಕ ಸ್ಮಾರಕವು {location}ನಲ್ಲಿ ಇದೆ. "
-            f"ಇದನ್ನು {built_by} ಅವರು {construction}ರ ಸಮಯದಲ್ಲಿ ನಿರ್ಮಿಸಿದರು. "
-            f"ಮುಖ್ಯ ಮಾಹಿತಿ: {fact}"
-        ),
-        "Punjabi": (
-            f"{name} ਵਿੱਚ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ। ਇਹ ਇਤਿਹਾਸਕ ਸਮਾਰਕ {location} ਵਿੱਚ "
-            f"ਸਥਿਤ ਹੈ। ਇਸਨੂੰ {built_by} ਨੇ {construction} ਦੇ ਆਸ-ਪਾਸ ਬਣਾਇਆ ਸੀ। "
-            f"ਇੱਕ ਮਹੱਤਵਪੂਰਨ ਤੱਥ ਹੈ: {fact}"
-        ),
+
+def normalize_details(
+    name: str,
+    parsed: Dict[str, Any],
+) -> Dict[str, Any]:
+
+    facts = (
+        parsed.get("key_facts")
+        or []
+    )
+
+    if not isinstance(
+        facts,
+        list,
+    ):
+
+        facts = [
+            str(facts)
+        ]
+
+    return {
+
+        "canonical_name":
+            name,
+
+        "location":
+            str(
+                parsed.get("location")
+                or "Unknown"
+            ),
+
+        "built_by":
+            str(
+                parsed.get("built_by")
+                or "Unknown"
+            ),
+
+        "construction_year":
+            str(
+                parsed.get("year")
+                or "Unknown"
+            ),
+
+        "theme":
+            str(
+                parsed.get("architectural_style")
+                or "Unknown"
+            ),
+
+        "key_facts":
+            [
+                str(x)
+                for x in facts[:8]
+            ],
+
+        "description":
+            str(
+                parsed.get("description")
+                or ""
+            ),
+
+        "confidence":
+            str(
+                parsed.get("confidence")
+                or "medium"
+            ).lower(),
     }
 
-    return templates.get(language, templates["English"])
-
-
-def create_narration(details: Dict[str, Any], language: str) -> str:
-    language = normalize_language(language)
-
-    if not gemini_available:
-        return fallback_narration(details, language)
-
-    prompt = f"""
-You are HeritageVoice AI, a professional multilingual historical tour guide.
-
-{language_instruction(language)}
-
-Create a natural 70-110 word narration for a visitor.
-
-Use ONLY the supplied monument information below.
-
-Monument:
-{details.get("canonical_name", "Unknown")}
-
-Location:
-{details.get("location", "Unknown")}
-
-Built by:
-{details.get("built_by", "Unknown")}
-
-Construction:
-{details.get("construction_year", "Unknown")}
-
-Architectural style:
-{details.get("theme", details.get("architectural_style", "Unknown"))}
-
-Historical context:
-{details.get("detailed_context", details.get("description", ""))}
-
-Key facts:
-{details.get("key_facts", [])}
-
-Rules:
-- Entire narration MUST be in {language}.
-- Do not mix languages.
-- Do not invent facts.
-- Do not add information not supplied above.
-- Do not use markdown.
-- Return ONLY the narration.
-"""
-
-    try:
-        return gemini_text(prompt)
-    except Exception as exc:
-        logger.warning("Narration fallback: %s", exc)
-        return fallback_narration(details, language)
 
 # =============================================================================
-# ROOT / HEALTH
+# ROOT
 # =============================================================================
 
 @app.get("/")
 def root():
+
     return {
+
         "status": "online",
-        "service": "HeritageVoice AI",
-        "version": "5.1.0",
-        "sdk": "google-genai" if NEW_SDK else "missing",
-        "gemini_available": gemini_available,
-        "model": GEMINI_MODEL,
-        "mode": "Live AI" if gemini_available else "Fallback",
-        "dynamic_monuments": len(DYNAMIC_MONUMENTS),
+
+        "service":
+            "HeritageVoice AI",
+
+        "gemini_available":
+            gemini_available,
+
+        "vision_model":
+            GEMINI_MODEL,
+
+        "tts_model":
+            GEMINI_TTS_MODEL,
+
+        "version":
+            "5.0.0",
     }
 
 
-@app.get("/api/health")
+# =============================================================================
+# HEALTH
+# =============================================================================
+
+@app.get("/health")
 def health():
+
     return {
+
         "status": "healthy",
-        "gemini_available": gemini_available,
-        "model": GEMINI_MODEL,
-        "sdk_available": NEW_SDK,
-        "dynamic_monuments": len(DYNAMIC_MONUMENTS),
+
+        "gemini_available":
+            gemini_available,
+
+        "model":
+            GEMINI_MODEL,
     }
+
 
 # =============================================================================
 # MONUMENT LIST
@@ -620,604 +778,1005 @@ def health():
 
 @app.get("/api/monuments")
 def get_monuments():
-    monuments = []
 
-    for monument_id, info in database.MONUMENT_CATALOG.items():
-        monuments.append({
-            "id": monument_id,
-            "canonical_name": info.get("canonical_name", monument_id),
-            "location": info.get("location", "Unknown"),
-            "built_by": info.get("built_by", "Unknown"),
-            "construction_year": info.get(
-                "construction_year",
-                info.get("year", "Unknown"),
-            ),
-            "theme": info.get(
-                "theme",
-                info.get("architectural_style", ""),
-            ),
-            "dynamic": False,
-        })
+    return [
 
-    for monument_id, info in DYNAMIC_MONUMENTS.items():
-        monuments.append({
-            "id": monument_id,
-            "canonical_name": info.get("canonical_name", monument_id),
-            "location": info.get("location", "Unknown"),
-            "built_by": info.get("built_by", "Unknown"),
-            "construction_year": info.get(
-                "construction_year",
-                info.get("year", "Unknown"),
-            ),
-            "theme": info.get(
-                "theme",
-                info.get("architectural_style", ""),
-            ),
-            "dynamic": True,
-        })
+        {
+            "id": key,
 
-    return monuments
+            "canonical_name":
+                value.get(
+                    "canonical_name",
+                    key.replace(
+                        "_",
+                        " "
+                    ).title(),
+                ),
+
+            "location":
+                value.get(
+                    "location",
+                    "Unknown",
+                ),
+
+            "built_by":
+                value.get(
+                    "built_by",
+                    "Unknown",
+                ),
+
+            "construction_year":
+                value.get(
+                    "construction_year",
+                    "Unknown",
+                ),
+        }
+
+        for key, value
+        in database.MONUMENT_CATALOG.items()
+    ]
+
 
 # =============================================================================
 # IDENTIFY MONUMENT
 # =============================================================================
 
 @app.post("/api/identify")
-def identify_monument(request: IdentifyRequest):
-    language = normalize_language(request.language)
+def identify_monument(
+    request: IdentifyRequest,
+):
 
-    logger.info("Identification request | language=%s", language)
+    language = normalize_language(
+        request.language
+    )
 
     # -------------------------------------------------------------------------
-    # 1. Decode image
+    # Decode image
     # -------------------------------------------------------------------------
 
     try:
-        image = decode_image(request.image)
+
+        image_bytes = clean_base64_image(
+            request.image
+        )
+
+        image = Image.open(
+            BytesIO(image_bytes)
+        ).convert("RGB")
+
+        max_size = 1280
+
+        if max(image.size) > max_size:
+
+            image.thumbnail(
+                (
+                    max_size,
+                    max_size,
+                ),
+                Image.Resampling.LANCZOS,
+            )
+
+        logger.info(
+            "Image received: %s | language=%s",
+            image.size,
+            language,
+        )
+
     except Exception as exc:
-        logger.warning("Invalid image received: %s", exc)
+
+        logger.exception(
+            "Image decode failed"
+        )
+
         raise HTTPException(
             status_code=400,
             detail=(
-                "Invalid image. Please upload a valid "
-                "JPG, PNG, or WEBP image."
+                "Invalid image. "
+                "Please upload a valid JPEG or PNG."
             ),
         ) from exc
 
     # -------------------------------------------------------------------------
-    # 2. Gemini Vision identifies the monument
+    # Gemini availability
     # -------------------------------------------------------------------------
 
     if not gemini_available:
+
         raise HTTPException(
             status_code=503,
             detail=(
                 "Gemini AI is unavailable. "
-                "Please check GEMINI_API_KEY and google-genai."
+                "Check GEMINI_API_KEY and google-genai."
             ),
         )
 
-    identification_prompt = """
-You are HeritageVoice AI, an expert monument recognition system.
+    # -------------------------------------------------------------------------
+    # Vision prompt
+    # -------------------------------------------------------------------------
+
+    prompt = f"""
+You are HeritageVoice AI, an expert monument recognition
+and historical tour-guide system.
 
 Analyze the supplied image carefully.
 
-Identify the exact monument or historical structure visible in the image.
+IDENTIFICATION:
+Identify the specific monument, landmark, fort, palace,
+temple, mosque, cave, memorial, tower, gate, stepwell,
+archaeological site or other heritage structure.
 
-Look at:
-- architecture
-- towers
-- domes
-- arches
-- columns
-- carvings
-- materials
-- inscriptions
-- shape
-- surrounding environment
-- distinctive structural features
+OPEN-WORLD RECOGNITION:
+- Consider India and other countries.
+- Consider famous and lesser-known monuments.
+- Use architecture, materials, carvings, domes, towers,
+  proportions, landscape and visual evidence.
+- Do not invent an unrelated monument.
+- If uncertain, give the most likely monument with low
+  or medium confidence.
+- If there is genuinely no recognizable monument,
+  return "Unknown Monument".
 
-Possible structures include:
-- monuments
-- temples
-- mosques
-- churches
-- forts
-- palaces
-- memorials
-- statues
-- towers
-- gates
-- caves
-- archaeological sites
-- bridges
-- other historical structures
+DATABASE GROUNDING:
+If the identified monument is a known Indian monument,
+use historically accurate information.
+Do not invent dates, builders or facts.
 
-IMPORTANT:
-- Do NOT automatically assume a famous monument.
-- Do NOT invent an unrelated monument.
-- If the image cannot be identified reliably, return "Unknown Monument".
-- Return ONLY valid JSON.
+LANGUAGE:
+The selected guide language is:
 
-JSON:
-{
-  "name": "specific monument name",
-  "confidence": "high"
-}
+{language}
 
-Confidence must be exactly one of:
-high
-medium
-low
+The narration MUST be entirely in {language}.
+
+IMPORTANT FOR INDIAN LANGUAGES:
+Write the narration using the correct native script.
+
+Hindi -> Devanagari
+Gujarati -> Gujarati script
+Tamil -> Tamil script
+Telugu -> Telugu script
+Bengali -> Bengali script
+Marathi -> Devanagari
+Kannada -> Kannada script
+Punjabi -> Gurmukhi
+
+Do NOT write Indian-language narration using English
+transliteration.
+
+NARRATION:
+- 70 to 110 words.
+- Natural spoken tour-guide style.
+- Mention monument and location.
+- Include useful historical/architectural information.
+- Use database facts when available.
+- Avoid unsupported claims.
+- Do not mention AI, Gemini, prompts or databases.
+
+Return ONLY the required JSON structure.
 """
 
+    # -------------------------------------------------------------------------
+    # Gemini Vision
+    # -------------------------------------------------------------------------
+
     try:
-        raw_response = gemini_vision(
+
+        parsed = gemini_vision_json(
             image,
-            identification_prompt,
+            prompt,
         )
 
-        result = extract_json(raw_response)
-
-        if not result:
-            raise RuntimeError("Gemini returned invalid JSON.")
-
-        identified_name = str(
-            result.get("name", "")
-        ).strip()
-
-        confidence = str(
-            result.get("confidence", "low")
-        ).lower().strip()
-
-        if confidence not in {"high", "medium", "low"}:
-            confidence = "low"
-
     except Exception as exc:
-        logger.exception("Gemini identification failed: %s", exc)
+
+        logger.exception(
+            "Gemini vision failed"
+        )
+
         raise HTTPException(
-            status_code=500,
-            detail=f"Could not identify the monument. {exc}",
+            status_code=502,
+            detail=(
+                "AI identification failed. "
+                f"{str(exc)}"
+            ),
         ) from exc
 
     # -------------------------------------------------------------------------
-    # 3. Unknown image
+    # Extract name
     # -------------------------------------------------------------------------
 
+    name = str(
+        parsed.get("name")
+        or ""
+    ).strip()
+
     if (
-        not identified_name
-        or identified_name.lower()
+        not name
+        or name.lower()
         in {
             "unknown",
             "unknown monument",
-            "unknown landmark",
+            "unidentified",
         }
     ):
+
         return {
-            "monument_id": "unknown",
-            "canonical_name": "Unknown Monument",
-            "name": "Unknown Monument",
-            "details": None,
-            "narration": None,
-            "language": language,
-            "confidence": "low",
-            "mode": "unknown",
-            "dynamic": False,
+
+            "monument_id":
+                "unknown",
+
+            "canonical_name":
+                "Monument Not Recognized",
+
+            "narration":
+                "I could not confidently identify this monument from the image. Please try a clearer photo where the structure is larger and more visible.",
+
+            "language":
+                language,
+
+            "details":
+                None,
         }
 
-    logger.info(
-        "Gemini identified=%s | confidence=%s",
-        identified_name,
-        confidence,
+    # -------------------------------------------------------------------------
+    # Match database
+    # -------------------------------------------------------------------------
+
+    catalog_key = database.search_monument(
+        name
     )
 
-    # -------------------------------------------------------------------------
-    # 4. SEARCH database.py FIRST
-    #
-    # This is the important part:
-    #
-    # Gemini -> identifies name
-    # database.py -> supplies verified facts when the monument exists
-    # Gemini fallback -> only used when database.py has no match
-    # -------------------------------------------------------------------------
+    if catalog_key:
 
-    catalog_id = database.search_monument(identified_name)
+        catalog = database.get_monument_by_id(
+            catalog_key
+        )
+
+        if not catalog:
+
+            catalog_key = None
 
     # -------------------------------------------------------------------------
-    # 5. DATABASE MATCH
+    # Database monument
     # -------------------------------------------------------------------------
 
-    if catalog_id:
-        catalog_info = database.get_monument_by_id(catalog_id)
+    if catalog_key:
 
-        if catalog_info:
-            name = catalog_info.get(
-                "canonical_name",
-                identified_name,
-            )
+        details = {
 
-            details = build_details(
-                name=name,
-                location=catalog_info.get("location", "Unknown"),
-                built_by=catalog_info.get("built_by", "Unknown"),
-                year=catalog_info.get(
+            "canonical_name":
+                catalog.get(
+                    "canonical_name",
+                    name,
+                ),
+
+            "location":
+                catalog.get(
+                    "location",
+                    "Unknown",
+                ),
+
+            "built_by":
+                catalog.get(
+                    "built_by",
+                    "Unknown",
+                ),
+
+            "construction_year":
+                catalog.get(
                     "construction_year",
-                    catalog_info.get("year", "Unknown"),
+                    "Unknown",
                 ),
-                architectural_style=catalog_info.get(
+
+            "theme":
+                catalog.get(
                     "theme",
-                    catalog_info.get("architectural_style", "Unknown"),
+                    "Unknown",
                 ),
-                description=catalog_info.get(
+
+            "key_facts":
+                catalog.get(
+                    "key_facts",
+                    [],
+                ),
+
+            "description":
+                catalog.get(
                     "detailed_context",
-                    catalog_info.get("description", ""),
+                    "",
                 ),
-                key_facts=normalize_key_facts(
-                    catalog_info.get("key_facts", [])
-                ),
-            )
 
-            # Narration is generated ONLY from database facts.
-            narration = create_narration(details, language)
+            "confidence":
+                str(
+                    parsed.get(
+                        "confidence",
+                        "medium",
+                    )
+                ).lower(),
+        }
 
-            logger.info(
-                "DATABASE MATCH | %s | ID=%s",
-                name,
-                catalog_id,
-            )
-
-            return {
-                "monument_id": catalog_id,
-                "canonical_name": name,
-                "name": name,
-                "location": details["location"],
-                "built_by": details["built_by"],
-                "construction_year": details["construction_year"],
-                "theme": details["theme"],
-                "key_facts": details["key_facts"],
-                "details": details,
-                "narration": narration,
-                "language": language,
-                "confidence": confidence,
-                "mode": "database",
-                "dynamic": False,
-            }
+        monument_id = catalog_key
 
     # -------------------------------------------------------------------------
-    # 6. NOT IN DATABASE -> GEMINI FALLBACK
+    # Gemini-only monument
     # -------------------------------------------------------------------------
+
+    else:
+
+        details = normalize_details(
+            name,
+            parsed,
+        )
+
+        monument_id = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            name.lower(),
+        ).strip("_")[:60]
+
+        if not monument_id:
+
+            monument_id = "dynamic_monument"
+
+    # -------------------------------------------------------------------------
+    # Narration
+    # -------------------------------------------------------------------------
+
+    narration = str(
+        parsed.get("narration")
+        or ""
+    ).strip()
+
+    if not narration:
+
+        narration = mock_narration(
+            details,
+            language,
+        )
 
     logger.info(
-        "NOT FOUND IN DATABASE | %s | Using Gemini fallback",
-        identified_name,
+        "Identified monument=%s | id=%s | language=%s",
+        details["canonical_name"],
+        monument_id,
+        language,
     )
 
-    fallback_prompt = f"""
-You are HeritageVoice AI, an expert historical monument researcher.
+    return {
 
-The image was visually identified as:
+        "monument_id":
+            monument_id,
 
-{identified_name}
+        "canonical_name":
+            details["canonical_name"],
 
-Provide accurate historical information about this monument.
+        "narration":
+            narration,
 
-Return ONLY valid JSON:
+        "language":
+            language,
 
-{{
-  "name": "{identified_name}",
-  "location": "city, state, country if known",
-  "built_by": "ruler, dynasty, architect or organization if known",
-  "year": "construction date or period if known",
-  "architectural_style": "architectural style if known",
-  "key_facts": [
-    "important fact 1",
-    "important fact 2",
-    "important fact 3"
-  ],
-  "description": "accurate historical description"
-}}
+        "language_code":
+            LANGUAGE_CODES.get(
+                language,
+                "en-US",
+            ),
 
-Rules:
+        "details":
+            details,
+    }
+
+
+# =============================================================================
+# GENERATE NARRATION
+# =============================================================================
+
+@app.post("/api/narrate")
+def generate_narration(
+    request: NarrationRequest,
+):
+
+    language = normalize_language(
+        request.language
+    )
+
+    details = request.details or {}
+
+    if not gemini_available:
+
+        return {
+
+            "narration":
+                mock_narration(
+                    {
+                        "canonical_name":
+                            request.monument_name,
+                        **details,
+                    },
+                    language,
+                ),
+
+            "language":
+                language,
+
+            "language_code":
+                LANGUAGE_CODES.get(
+                    language,
+                    "en-US",
+                ),
+        }
+
+    prompt = f"""
+You are HeritageVoice AI, a multilingual historical
+tour guide.
+
+Generate a natural spoken narration for this monument.
+
+MONUMENT:
+{request.monument_name}
+
+LOCATION:
+{details.get("location", "Unknown")}
+
+BUILT BY:
+{details.get("built_by", "Unknown")}
+
+CONSTRUCTION:
+{details.get("construction_year", "Unknown")}
+
+ARCHITECTURAL STYLE:
+{details.get("theme", "Unknown")}
+
+KEY FACTS:
+{details.get("key_facts", [])}
+
+DESCRIPTION:
+{details.get("description", "")}
+
+TARGET LANGUAGE:
+{language}
+
+IMPORTANT:
+- Entire response MUST be in {language}.
+- Use the correct native script.
+- Do not use transliteration for Indian languages.
+- Do not change the monument.
 - Do not invent facts.
-- If information is uncertain, write "Unknown".
-- Keep key_facts to a maximum of 5 items.
-- Keep the monument name consistent with the identified monument.
+- 70-110 words.
+- Natural tour-guide style.
+- Return ONLY narration.
 """
 
     try:
-        raw_response = gemini_text(fallback_prompt)
-        ai_result = extract_json(raw_response)
 
-        if not ai_result:
-            raise RuntimeError("Gemini returned invalid monument data.")
-
-        name = str(
-            ai_result.get("name", identified_name)
-        ).strip() or identified_name
-
-        location = str(
-            ai_result.get("location", "Unknown")
-        ).strip() or "Unknown"
-
-        built_by = str(
-            ai_result.get("built_by", "Unknown")
-        ).strip() or "Unknown"
-
-        year = str(
-            ai_result.get("year", "Unknown")
-        ).strip() or "Unknown"
-
-        architectural_style = str(
-            ai_result.get("architectural_style", "Unknown")
-        ).strip() or "Unknown"
-
-        description = str(
-            ai_result.get("description", "")
-        ).strip()
-
-        key_facts = normalize_key_facts(
-            ai_result.get("key_facts", [])
+        narration = gemini_text(
+            prompt
         )
 
-        details = build_details(
-            name=name,
-            location=location,
-            built_by=built_by,
-            year=year,
-            architectural_style=architectural_style,
-            description=description,
-            key_facts=key_facts,
-        )
+        if not narration:
 
-        monument_id = make_dynamic_monument_id(name)
-
-        register_dynamic_monument(
-            monument_id,
-            details,
-        )
-
-        narration = create_narration(details, language)
+            raise ValueError(
+                "Empty narration"
+            )
 
         return {
-            "monument_id": monument_id,
-            "canonical_name": name,
-            "name": name,
-            "location": location,
-            "built_by": built_by,
-            "construction_year": year,
-            "theme": architectural_style,
-            "key_facts": key_facts,
-            "details": details,
-            "narration": narration,
-            "language": language,
-            "confidence": confidence,
-            "mode": "gemini",
-            "dynamic": True,
+
+            "narration":
+                narration,
+
+            "language":
+                language,
+
+            "language_code":
+                LANGUAGE_CODES.get(
+                    language,
+                    "en-US",
+                ),
+        }
+
+    except Exception:
+
+        logger.exception(
+            "Narration generation failed"
+        )
+
+        return {
+
+            "narration":
+                mock_narration(
+                    {
+                        "canonical_name":
+                            request.monument_name,
+                        **details,
+                    },
+                    language,
+                ),
+
+            "language":
+                language,
+
+            "language_code":
+                LANGUAGE_CODES.get(
+                    language,
+                    "en-US",
+                ),
+        }
+
+
+# =============================================================================
+# GEMINI TTS
+# =============================================================================
+
+@app.post("/api/tts")
+def generate_tts(
+    request: TTSRequest,
+):
+
+    language = normalize_language(
+        request.language
+    )
+
+    text = (
+        request.text
+        or ""
+    ).strip()
+
+    if not text:
+
+        raise HTTPException(
+            status_code=400,
+            detail="TTS text cannot be empty.",
+        )
+
+    if not gemini_available:
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Gemini TTS is unavailable."
+            ),
+        )
+
+    language_code = LANGUAGE_CODES.get(
+        language,
+        "en-US",
+    )
+
+    logger.info(
+        "Generating TTS | language=%s | code=%s",
+        language,
+        language_code,
+    )
+
+    # Explicitly tell Gemini which language to speak.
+    tts_prompt = f"""
+Speak the following tour-guide narration naturally.
+
+LANGUAGE:
+{language}
+
+LANGUAGE CODE:
+{language_code}
+
+IMPORTANT:
+- Speak ONLY in {language}.
+- For Indian languages, pronounce the native script
+  naturally.
+- Do not translate the text into English.
+- Do not read the language instructions aloud.
+- Use a clear, friendly museum-tour-guide voice.
+
+TEXT:
+{text}
+"""
+
+    try:
+
+        response = gemini_client.models.generate_content(
+
+            model=GEMINI_TTS_MODEL,
+
+            contents=tts_prompt,
+
+            config=genai_types.GenerateContentConfig(
+
+                response_modalities=[
+                    "AUDIO"
+                ],
+
+                speech_config=genai_types.SpeechConfig(
+
+                    voice_config=genai_types.VoiceConfig(
+
+                        prebuilt_voice_config=
+                        genai_types.PrebuiltVoiceConfig(
+                            voice_name="Kore"
+                        ),
+                    )
+                ),
+            ),
+        )
+
+        # ---------------------------------------------------------------------
+        # Extract audio
+        # ---------------------------------------------------------------------
+
+        audio_data = None
+
+        mime_type = (
+            "audio/L16;rate=24000;channels=1"
+        )
+
+        try:
+
+            parts = (
+                response
+                .candidates[0]
+                .content
+                .parts
+            )
+
+            for part in parts:
+
+                if getattr(
+                    part,
+                    "inline_data",
+                    None,
+                ):
+
+                    audio_data = (
+                        part.inline_data.data
+                    )
+
+                    if getattr(
+                        part.inline_data,
+                        "mime_type",
+                        None,
+                    ):
+
+                        mime_type = (
+                            part.inline_data.mime_type
+                        )
+
+                    break
+
+        except Exception:
+
+            logger.exception(
+                "Could not extract Gemini audio"
+            )
+
+        if not audio_data:
+
+            raise RuntimeError(
+                "Gemini returned no audio data"
+            )
+
+        # ---------------------------------------------------------------------
+        # Convert PCM audio to WAV
+        # ---------------------------------------------------------------------
+
+        wav_buffer = BytesIO()
+
+        with wave.open(
+            wav_buffer,
+            "wb",
+        ) as wav_file:
+
+            wav_file.setnchannels(
+                1
+            )
+
+            wav_file.setsampwidth(
+                2
+            )
+
+            wav_file.setframerate(
+                24000
+            )
+
+            wav_file.writeframes(
+                audio_data
+            )
+
+        wav_bytes = (
+            wav_buffer.getvalue()
+        )
+
+        encoded_audio = base64.b64encode(
+            wav_bytes
+        ).decode("utf-8")
+
+        return {
+
+            "success":
+                True,
+
+            "language":
+                language,
+
+            "language_code":
+                language_code,
+
+            "mime_type":
+                "audio/wav",
+
+            "sample_rate":
+                24000,
+
+            "audio_base64":
+                encoded_audio,
         }
 
     except Exception as exc:
-        logger.exception("Gemini fallback failed: %s", exc)
+
+        logger.exception(
+            "Gemini TTS failed"
+        )
+
         raise HTTPException(
-            status_code=500,
-            detail=f"Could not process the monument. {exc}",
+            status_code=502,
+            detail=(
+                "TTS generation failed: "
+                f"{str(exc)}"
+            ),
         ) from exc
 
-# =============================================================================
-# NARRATION
-# =============================================================================
-
-@app.post("/api/narration")
-@app.post("/api/narrate")
-def generate_narration(request: NarrationRequest):
-    language = normalize_language(request.language)
-
-    details = {
-        **(request.details or {}),
-        "canonical_name": request.monument_name,
-    }
-
-    narration = create_narration(details, language)
-
-    return {
-        "narration": narration,
-        "language": language,
-        "mode": "live_ai" if gemini_available else "fallback",
-    }
 
 # =============================================================================
 # CHAT
 # =============================================================================
 
 @app.post("/api/chat")
-def chat(request: ChatRequest):
-    language = normalize_language(request.language)
+def chat_with_guide(
+    request: ChatRequest,
+):
 
-    # Frontend currently sends monument_details.
-    details = request.monument_details or request.details
+    language = normalize_language(
+        request.language
+    )
 
-    # If the monument is in database.py, database.py is authoritative.
-    catalog_info = database.get_monument_by_id(request.monument_id)
+    catalog = database.get_monument_by_id(
+        request.monument_id
+    )
 
-    if catalog_info:
-        details = catalog_info
-        display_name = catalog_info.get(
+    # -------------------------------------------------------------------------
+    # Database monument
+    # -------------------------------------------------------------------------
+
+    if catalog:
+
+        display_name = catalog.get(
             "canonical_name",
             request.monument_id,
         )
-    elif details:
-        display_name = details.get(
-            "canonical_name",
-            details.get("name", request.monument_id),
+
+        grounding = (
+            f"Monument: "
+            f"{catalog.get('canonical_name', display_name)}\n"
+
+            f"Location: "
+            f"{catalog.get('location', 'Unknown')}\n"
+
+            f"Built by: "
+            f"{catalog.get('built_by', 'Unknown')}\n"
+
+            f"Construction: "
+            f"{catalog.get('construction_year', 'Unknown')}\n"
+
+            f"Architectural style: "
+            f"{catalog.get('theme', 'Unknown')}\n"
+
+            f"Description: "
+            f"{catalog.get('detailed_context', '')}\n"
+
+            f"Key facts: "
+            f"{'; '.join(str(x) for x in catalog.get('key_facts', []))}"
         )
+
+    # -------------------------------------------------------------------------
+    # Gemini-only monument
+    # -------------------------------------------------------------------------
+
+    elif request.monument_details:
+
+        details = request.monument_details
+
+        display_name = (
+            request.monument_name
+            or details.get(
+                "canonical_name",
+                request.monument_id.replace(
+                    "_",
+                    " "
+                ).title(),
+            )
+        )
+
+        facts = details.get(
+            "key_facts",
+            [],
+        )
+
+        if not isinstance(
+            facts,
+            list,
+        ):
+
+            facts = [
+                str(facts)
+            ]
+
+        grounding = (
+            f"Monument: {display_name}\n"
+
+            f"Location: "
+            f"{details.get('location', 'Unknown')}\n"
+
+            f"Built by: "
+            f"{details.get('built_by', 'Unknown')}\n"
+
+            f"Construction: "
+            f"{details.get('construction_year', 'Unknown')}\n"
+
+            f"Architectural style: "
+            f"{details.get('theme', 'Unknown')}\n"
+
+            f"Description: "
+            f"{details.get('description', '')}\n"
+
+            f"Key facts: "
+            f"{'; '.join(str(x) for x in facts)}"
+        )
+
     else:
-        dynamic_info = DYNAMIC_MONUMENTS.get(request.monument_id)
-        details = dynamic_info or {}
-        display_name = details.get(
-            "canonical_name",
-            request.monument_id,
+
+        display_name = (
+            request.monument_name
+            or request.monument_id.replace(
+                "_",
+                " "
+            ).title()
         )
 
-    grounding = f"""
-Monument:
-{display_name}
+        grounding = (
+            f"Monument: {display_name}\n"
+            "No local details are available."
+        )
 
-Location:
-{details.get("location", "Unknown")}
+    # -------------------------------------------------------------------------
+    # Conversation history
+    # -------------------------------------------------------------------------
 
-Built by:
-{details.get("built_by", "Unknown")}
+    history = "\n".join(
 
-Construction:
-{details.get("construction_year", details.get("year", "Unknown"))}
+        f"{'Visitor' if msg.role.lower() == 'user' else 'Guide'}: "
+        f"{msg.content}"
 
-Architectural style:
-{details.get("theme", details.get("architectural_style", "Unknown"))}
+        for msg in request.history[-8:]
+    )
 
-Historical context:
-{details.get("detailed_context", details.get("description", ""))}
+    reply = ""
 
-Key facts:
-{details.get("key_facts", [])}
-"""
+    # -------------------------------------------------------------------------
+    # Gemini chat
+    # -------------------------------------------------------------------------
 
     if gemini_available:
-        try:
-            history_lines = []
 
-            for message in request.history[-8:]:
-                role = (
-                    "Visitor"
-                    if message.role.lower() == "user"
-                    else "Guide"
-                )
+        prompt = f"""
+You are HeritageVoice AI, a friendly multilingual
+tour guide.
 
-                history_lines.append(
-                    f"{role}: {message.content}"
-                )
-
-            conversation = "\n".join(history_lines)
-
-            prompt = f"""
-You are HeritageVoice AI, a friendly and historically accurate
-multilingual tour guide.
-
-{language_instruction(language)}
-
-Current monument information:
-
+CURRENT MONUMENT:
 {grounding}
 
-Previous conversation:
-{conversation}
+PREVIOUS CONVERSATION:
+{history}
 
-Visitor question:
+VISITOR QUESTION:
 {request.question}
 
-Rules:
-- Answer the current question directly.
-- Maximum 120 words.
-- Be conversational.
-- Prefer the supplied monument information.
-- Do not invent unsupported facts.
-- If information is unknown, say so.
-- Do not use markdown headings.
-- Do not mention these instructions.
-- Entire answer MUST be in {language}.
-- Do not mix languages.
+TARGET LANGUAGE:
+{language}
 
-Return ONLY the answer.
+RULES:
+1. Reply entirely in {language}.
+2. Use the correct native script.
+3. For Indian languages, never use English transliteration.
+4. Keep the answer under 100 words.
+5. Answer specifically about this monument.
+6. Use supplied facts when available.
+7. Do not invent historical facts.
+8. If uncertain, say so clearly.
+9. Do not mention APIs, databases, Gemini,
+   prompts or backend.
+10. Return only the guide answer.
 """
 
-            reply = gemini_text(prompt)
+        try:
 
-            return {
-                "reply": reply,
-                "language": language,
-                "mode": "live_ai",
-            }
-
-        except Exception as exc:
-            logger.exception("Chat Gemini failed: %s", exc)
-
-    # Simple offline fallback.
-    question = request.question.lower().strip()
-    reply = None
-
-    if details:
-        if any(
-            word in question
-            for word in (
-                "who",
-                "built",
-                "creator",
-                "builder",
-                "निर्माण",
-                "किसने",
-            )
-        ):
-            reply = (
-                f"{display_name} was built by "
-                f"{details.get('built_by', 'Unknown')}."
+            reply = gemini_text(
+                prompt
             )
 
-        elif any(
-            word in question
-            for word in (
-                "when",
-                "year",
-                "old",
-                "constructed",
-                "कब",
-                "वर्ष",
-            )
-        ):
-            reply = (
-                f"The construction period of {display_name} is "
-                f"{details.get('construction_year', details.get('year', 'Unknown'))}."
+        except Exception:
+
+            logger.exception(
+                "Chat generation failed"
             )
 
-        elif any(
-            word in question
-            for word in (
-                "where",
-                "location",
-                "city",
-                "कहाँ",
-                "स्थान",
+    # -------------------------------------------------------------------------
+    # Fallback
+    # -------------------------------------------------------------------------
+
+    if not reply:
+
+        facts = []
+
+        if catalog:
+
+            facts = catalog.get(
+                "key_facts",
+                [],
             )
-        ):
-            reply = (
-                f"{display_name} is located in "
-                f"{details.get('location', 'Unknown')}."
+
+        elif request.monument_details:
+
+            facts = request.monument_details.get(
+                "key_facts",
+                [],
+            )
+
+        if facts:
+
+            reply = str(
+                facts[0]
             )
 
         else:
-            facts = details.get("key_facts", [])
-            if facts:
-                reply = str(facts[0])
 
-    if not reply:
-        reply = (
-            f"I don't have enough information to answer that "
-            f"about {display_name}."
-        )
+            reply = (
+                f"{display_name} is a notable "
+                "historical monument."
+            )
 
     return {
-        "reply": reply,
-        "language": language,
-        "mode": "fallback",
+
+        "reply":
+            reply,
+
+        "language":
+            language,
+
+        "language_code":
+            LANGUAGE_CODES.get(
+                language,
+                "en-US",
+            ),
+
+        "monument":
+            display_name,
     }
 
+
 # =============================================================================
-# LOCAL SERVER
+# START SERVER
 # =============================================================================
 
 if __name__ == "__main__":
+
     import uvicorn
 
     logger.info(
-        "Starting HeritageVoice AI on %s:%s",
+        "Starting HeritageVoice AI v5.0"
+    )
+
+    logger.info(
+        "Host: %s",
         config.HOST,
+    )
+
+    logger.info(
+        "Port: %s",
         config.PORT,
     )
 
@@ -1227,4 +1786,3 @@ if __name__ == "__main__":
         port=config.PORT,
         reload=False,
     )
-

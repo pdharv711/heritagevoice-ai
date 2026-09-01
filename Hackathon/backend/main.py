@@ -83,7 +83,7 @@ if config.GEMINI_API_KEY and NEW_SDK:
         gemini_client = genai.Client(
             api_key=config.GEMINI_API_KEY,
             http_options=genai_types.HttpOptions(
-                timeout=30000
+                timeout=1200000
             ),
         )
 

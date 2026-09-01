@@ -539,17 +539,6 @@ export default function Home() {
           "audio"
         );
 
-        /*
-         * Try to automatically speak the new narration.
-         * If the browser blocks autoplay, the user can
-         * simply press Listen.
-         */
-        window.setTimeout(() => {
-          void speakText(
-            data.narration,
-            newLanguage
-          );
-        }, 300);
       } catch (error) {
         console.error(
           "Language change error:",
@@ -657,16 +646,6 @@ export default function Home() {
           null
         );
 
-        /*
-         * Give React time to update the UI before
-         * attempting Gemini TTS playback.
-         */
-        window.setTimeout(() => {
-          void speakText(
-            data.narration,
-            language
-          );
-        }, 500);
       } catch (error) {
         console.error(
           "Identification error:",
@@ -1246,4 +1225,3 @@ ${String(error)}`
     </main>
   );
 }
-

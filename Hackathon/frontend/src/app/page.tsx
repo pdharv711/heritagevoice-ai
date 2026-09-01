@@ -159,77 +159,146 @@ export default function Home() {
       const synth = synthRef.current;
 
       if (!synth || !text) {
+        console.warn("Speech synthesis is not available.");
         return;
       }
 
-      // Stop previous speech
+      // Stop any previous narration.
       synth.cancel();
       setIsSpeaking(false);
 
-      const cleanText = text.replace(/[*#`_]/g, "").trim();
+      const cleanText = text
+        .replace(/[*#`_]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
 
-      if (!cleanText) {
-        return;
-      }
+      if (!cleanText) return;
 
       const bcp47 = getBcp47(languageCode);
-      const voice = pickVoice(bcp47);
+      const languagePrefix = bcp47.split("-")[0].toLowerCase();
 
-      console.log("Requested language:", languageCode);
-      console.log("Requested BCP-47:", bcp47);
-      console.log("Selected voice:", voice);
+      const speak = () => {
+        const voices = synth.getVoices();
 
-      const utterance = new SpeechSynthesisUtterance(cleanText);
+        console.log(
+          "Available voices:",
+          voices.map((v) => `${v.name} (${v.lang})`)
+        );
 
-      utteranceRef.current = utterance;
+        const voice = pickVoice(bcp47);
 
-      // ALWAYS set requested language.
-      // This is important when the browser has no exact voice.
-      utterance.lang = bcp47;
+        console.log("Requested language:", languageCode);
+        console.log("Requested BCP-47:", bcp47);
+        console.log(
+          "Selected voice:",
+          voice ? `${voice.name} (${voice.lang})` : "NONE"
+        );
 
-      if (voice) {
-        utterance.voice = voice;
-        setActiveVoiceName(`${voice.name} (${voice.lang})`);
-      } else {
-        setActiveVoiceName(`Browser voice unavailable (${bcp47})`);
-      }
-
-      utterance.rate = 0.90;
-      utterance.pitch = 1;
-      utterance.volume = 1;
-
-      utterance.onstart = () => {
-        console.log("Speech started:", languageCode);
-        setIsSpeaking(true);
-      };
-
-      utterance.onend = () => {
-        console.log("Speech finished:", languageCode);
-        setIsSpeaking(false);
-      };
-
-      utterance.onerror = (event) => {
-        console.error("Speech error:", event);
-
-        setIsSpeaking(false);
-
-        // Do not show an error for a normal cancellation.
-        if (event.error !== "canceled" && event.error !== "interrupted") {
+        // Important: do not silently use an unrelated language voice.
+        // If Tamil/Gujarati/etc. is unavailable, the user gets a clear
+        // status instead of hearing the wrong language.
+        if (!voice) {
+          setActiveVoiceName(`No ${languageCode} voice installed`);
           console.warn(
-            `Browser could not speak ${languageCode} (${bcp47}).`
+            `No browser TTS voice is available for ${languageCode} (${bcp47}).`
           );
+          return;
         }
+
+        // Long browser utterances can fail or stop unexpectedly.
+        // Split narration into small sentence-based chunks.
+        const chunks = cleanText
+          .match(/[^.!?。！？।]+[.!?。！？।]*/g)
+          ?.map((part) => part.trim())
+          .filter(Boolean) ?? [cleanText];
+
+        let index = 0;
+        let started = false;
+
+        const speakNext = () => {
+          if (index >= chunks.length) {
+            setIsSpeaking(false);
+            console.log("Speech finished:", languageCode);
+            return;
+          }
+
+          const utterance = new SpeechSynthesisUtterance(chunks[index]);
+          utteranceRef.current = utterance;
+
+          utterance.lang = bcp47;
+          utterance.voice = voice;
+          utterance.rate = 0.90;
+          utterance.pitch = 1;
+          utterance.volume = 1;
+
+          utterance.onstart = () => {
+            started = true;
+            setIsSpeaking(true);
+            setActiveVoiceName(`${voice.name} (${voice.lang})`);
+            console.log(
+              `Speech started: ${languageCode} using ${voice.name}`
+            );
+          };
+
+          utterance.onend = () => {
+            index += 1;
+            window.setTimeout(speakNext, 40);
+          };
+
+          utterance.onerror = (event) => {
+            console.error("Speech error:", event);
+
+            if (
+              event.error !== "canceled" &&
+              event.error !== "interrupted"
+            ) {
+              setIsSpeaking(false);
+
+              if (!started) {
+                setActiveVoiceName(
+                  `${voice.name} could not speak ${languageCode}`
+                );
+              }
+            }
+          };
+
+          try {
+            synth.speak(utterance);
+          } catch (error) {
+            console.error("Speech synthesis failed:", error);
+            setIsSpeaking(false);
+          }
+        };
+
+        speakNext();
       };
 
-      // Chrome sometimes needs a tiny delay after cancel()
-      setTimeout(() => {
-        try {
-          synth.speak(utterance);
-        } catch (error) {
-          console.error("Speech synthesis failed:", error);
-          setIsSpeaking(false);
-        }
-      }, 100);
+      // Chrome can return an empty voice list on the first call.
+      if (synth.getVoices().length > 0) {
+        window.setTimeout(speak, 100);
+      } else {
+        const onVoicesChanged = () => {
+          synth.removeEventListener("voiceschanged", onVoicesChanged);
+          window.setTimeout(speak, 100);
+        };
+
+        synth.addEventListener("voiceschanged", onVoicesChanged);
+
+        // Final fallback if Chrome does not fire voiceschanged.
+        window.setTimeout(() => {
+          synth.removeEventListener("voiceschanged", onVoicesChanged);
+          if (!synth.getVoices().length) {
+            setActiveVoiceName(
+              `No browser voices available for ${languageCode}`
+            );
+            console.warn(
+              `No browser voices loaded for ${languageCode} (${languagePrefix}).`
+            );
+            return;
+          }
+          speak();
+        }, 2500);
+      }
     },
     [pickVoice]
   );

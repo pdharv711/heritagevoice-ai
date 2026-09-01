@@ -5,9 +5,14 @@ export default function Footer() {
         <p className="text-sm font-medium text-gray-500 sm:text-base">
           Developed by{" "}
           <span className="font-semibold text-gray-700">Patel Dharv</span>
+          {" & "}
+          <span className="font-semibold text-gray-700">Parmar Dhruvil</span>
         </p>
         <p className="mt-1 text-[11px] text-gray-400 sm:text-xs">
           HeritageVoice AI • OMNIKON Hackathon 2026
+        </p>
+        <p className="mt-1 text-[10px] font-semibold text-gray-400 sm:text-[11px]">
+          Tech Sparker
         </p>
       </div>
     </footer>

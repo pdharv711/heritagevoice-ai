@@ -1,8 +1,9 @@
-import base64
+
 import json
 import logging
 import os
 import re
+import time
 from io import BytesIO
 from typing import List, Dict, Any, Optional
 
@@ -72,6 +73,15 @@ app.add_middleware(
 gemini_client = None
 gemini_available = False
 
+# Runtime catalog for monuments discovered by Gemini but not present in database.py.
+DYNAMIC_MONUMENTS: Dict[str, Dict[str, Any]] = {}
+gemini_quota_blocked_until = 0.0
+
+
+class GeminiQuotaError(RuntimeError):
+    """Gemini quota/rate-limit exhaustion."""
+
+
 # Current Gemini Flash model.
 # Can be overridden using Render environment variable GEMINI_MODEL.
 GEMINI_MODEL = os.getenv(
@@ -120,48 +130,54 @@ else:
 # SUPPORTED LANGUAGES
 # =============================================================================
 
-SUPPORTED_LANGUAGES = {
-    "English",
-    "Hindi",
-    "Tamil",
-    "Telugu",
-    "Bengali",
-    "Marathi",
-    "Gujarati",
-    "Kannada",
-    "Punjabi",
-    "French",
-    "Spanish",
-    "German",
-    "Arabic",
-    "Japanese",
-    "Korean",
-    "Portuguese",
-    "Russian",
-    "Italian",
+SUPPORTED_LANGUAGES = [
+    "English", "Hindi", "Tamil", "Telugu", "Bengali", "Marathi",
+    "Gujarati", "Kannada", "Punjabi", "French", "Spanish", "German",
+    "Arabic", "Japanese", "Korean", "Portuguese", "Russian", "Italian",
+]
+
+LANGUAGE_ALIASES = {
+    "en": "English", "en-us": "English", "en-in": "English", "english": "English",
+    "hi": "Hindi", "hi-in": "Hindi", "hindi": "Hindi", "हिन्दी": "Hindi", "हिंदी": "Hindi",
+    "ta": "Tamil", "ta-in": "Tamil", "tamil": "Tamil", "தமிழ்": "Tamil",
+    "te": "Telugu", "te-in": "Telugu", "telugu": "Telugu", "తెలుగు": "Telugu",
+    "bn": "Bengali", "bn-in": "Bengali", "bengali": "Bengali", "বাংলা": "Bengali",
+    "mr": "Marathi", "mr-in": "Marathi", "marathi": "Marathi", "मराठी": "Marathi",
+    "gu": "Gujarati", "gu-in": "Gujarati", "gujarati": "Gujarati", "ગુજરાતી": "Gujarati",
+    "kn": "Kannada", "kn-in": "Kannada", "kannada": "Kannada", "ಕನ್ನಡ": "Kannada",
+    "pa": "Punjabi", "pa-in": "Punjabi", "punjabi": "Punjabi", "ਪੰਜਾਬੀ": "Punjabi",
+    "fr": "French", "fr-fr": "French", "french": "French", "français": "French",
+    "es": "Spanish", "es-es": "Spanish", "spanish": "Spanish", "español": "Spanish",
+    "de": "German", "de-de": "German", "german": "German", "deutsch": "German",
+    "ar": "Arabic", "ar-sa": "Arabic", "arabic": "Arabic", "العربية": "Arabic",
+    "ja": "Japanese", "ja-jp": "Japanese", "japanese": "Japanese", "日本語": "Japanese",
+    "ko": "Korean", "ko-kr": "Korean", "korean": "Korean", "한국어": "Korean",
+    "pt": "Portuguese", "pt-br": "Portuguese", "portuguese": "Portuguese", "português": "Portuguese",
+    "ru": "Russian", "ru-ru": "Russian", "russian": "Russian", "русский": "Russian",
+    "it": "Italian", "it-it": "Italian", "italian": "Italian", "italiano": "Italian",
 }
 
 
 def normalize_language(language: str) -> str:
-    """
-    Normalize the language selected by the frontend.
-    """
-
+    """Normalize display names, language codes, locale codes, and native names."""
     if not language:
         return "English"
-
-    language = str(language).strip()
-
+    raw = str(language).strip()
+    if not raw:
+        return "English"
     for supported in SUPPORTED_LANGUAGES:
-
-        if supported.lower() == language.lower():
+        if supported.casefold() == raw.casefold():
             return supported
-
-    logger.warning(
-        f"Unsupported language '{language}'. "
-        "Falling back to English."
-    )
-
+    normalized = raw.casefold().replace("_", "-")
+    base = normalized.split("(", 1)[0].strip()
+    if base in LANGUAGE_ALIASES:
+        return LANGUAGE_ALIASES[base]
+    if normalized in LANGUAGE_ALIASES:
+        return LANGUAGE_ALIASES[normalized]
+    first_part = normalized.split("-", 1)[0]
+    if first_part in LANGUAGE_ALIASES:
+        return LANGUAGE_ALIASES[first_part]
+    logger.warning(f"Unsupported language '{language}'. Falling back to English.")
     return "English"
 
 
@@ -281,6 +297,51 @@ class NarrationRequest(BaseModel):
 
 
 # =============================================================================
+# RUNTIME MONUMENT CATALOG HELPERS
+# =============================================================================
+
+def get_runtime_monument(monument_id: str) -> Optional[Dict[str, Any]]:
+    if not monument_id:
+        return None
+    normalized_id = str(monument_id).strip().lower()
+    return database.get_monument_by_id(normalized_id) or DYNAMIC_MONUMENTS.get(normalized_id)
+
+
+def register_dynamic_monument(monument_id: str, name: str, location: str,
+                               built_by: str, year: str,
+                               architectural_style: str, key_facts: List[str],
+                               description: str, confidence: str) -> None:
+    DYNAMIC_MONUMENTS[monument_id] = {
+        "canonical_name": name,
+        "location": location,
+        "built_by": built_by,
+        "construction_year": year,
+        "theme": architectural_style,
+        "architectural_style": architectural_style,
+        "key_facts": key_facts,
+        "description": description,
+        "detailed_context": description,
+        "confidence": confidence,
+        "source": "Gemini Vision",
+        "dynamic": True,
+    }
+
+
+def unique_dynamic_monument_id(name: str) -> str:
+    base_id = make_dynamic_monument_id(name)
+    existing = database.get_monument_by_id(base_id) or DYNAMIC_MONUMENTS.get(base_id)
+    if not existing:
+        return base_id
+    if str(existing.get("canonical_name", "")).casefold() == str(name).casefold():
+        return base_id
+    for number in range(2, 1000):
+        candidate = f"{base_id}_{number}"
+        if not database.get_monument_by_id(candidate) and candidate not in DYNAMIC_MONUMENTS:
+            return candidate
+    return f"{base_id}_{int(time.time())}"
+
+
+# =============================================================================
 # MOCK NARRATION
 # =============================================================================
 
@@ -345,7 +406,7 @@ MOCK_NARRATIONS = {
         "vers {construction}. Fait important : {key_fact}",
 
     "Spanish":
-        "¡Bienvenido à {name}! Este monumento histórico está "
+        "¡Bienvenido a {name}! Este monumento histórico está "
         "en {location}. Fue construido por {built_by} "
         "alrededor de {construction}. Dato importante: {key_fact}",
 
@@ -603,96 +664,70 @@ def mock_narration(
 # =============================================================================
 
 def ensure_gemini_available():
-
     if not NEW_SDK:
-
-        raise RuntimeError(
-            "google-genai package is not installed."
-        )
-
+        raise RuntimeError("google-genai package is not installed.")
     if not gemini_client:
+        raise RuntimeError("Gemini client is not initialized. Check GEMINI_API_KEY.")
 
-        raise RuntimeError(
-            "Gemini client is not initialized. "
-            "Check GEMINI_API_KEY."
-        )
+
+def _quota_retry_seconds(error_text: str) -> int:
+    match = re.search(r"(?:retryDelay|retry_delay).*?(\d+)s", error_text, re.IGNORECASE)
+    if not match:
+        match = re.search(r"(\d+)s", error_text, re.IGNORECASE)
+    return max(10, min(int(match.group(1)), 300)) if match else 60
+
+
+def _is_quota_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(x in text for x in ("429", "resource_exhausted", "quota exceeded", "quotafailure", "rate limit"))
+
+
+def _check_quota_cooldown() -> None:
+    if time.time() < gemini_quota_blocked_until:
+        remaining = max(1, int(gemini_quota_blocked_until - time.time()))
+        raise GeminiQuotaError(f"Gemini quota is temporarily exhausted. Retry in about {remaining} seconds.")
+
+
+def _handle_gemini_exception(error: Exception) -> None:
+    global gemini_quota_blocked_until
+    if _is_quota_error(error):
+        retry_seconds = _quota_retry_seconds(str(error))
+        gemini_quota_blocked_until = time.time() + retry_seconds
+        logger.warning(f"Gemini quota/rate limit reached. Suppressing calls for {retry_seconds}s.")
+        raise GeminiQuotaError(f"Gemini API quota is temporarily exhausted. Retry in about {retry_seconds} seconds.") from error
+    raise error
 
 
 def gemini_text(prompt: str) -> str:
-
     ensure_gemini_available()
-
-    response = gemini_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-    )
-
-    text = getattr(
-        response,
-        "text",
-        None,
-    )
-
+    _check_quota_cooldown()
+    try:
+        response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    except Exception as error:
+        _handle_gemini_exception(error)
+    text = getattr(response, "text", None)
     if not text:
-
-        raise RuntimeError(
-            "Gemini returned an empty response."
-        )
-
+        raise RuntimeError("Gemini returned an empty response.")
     return text.strip()
 
 
-def gemini_vision(
-    pil_image: Image.Image,
-    prompt: str,
-) -> str:
-
+def gemini_vision(pil_image: Image.Image, prompt: str) -> str:
     ensure_gemini_available()
-
+    _check_quota_cooldown()
     image_buffer = BytesIO()
-
-    pil_image.save(
-        image_buffer,
-        format="JPEG",
-        quality=90,
-    )
-
-    image_bytes = image_buffer.getvalue()
-
-    image_part = genai_types.Part.from_bytes(
-        data=image_bytes,
-        mime_type="image/jpeg",
-    )
-
-    text_part = genai_types.Part.from_text(
-        text=prompt
-    )
-
-    response = gemini_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            genai_types.Content(
-                parts=[
-                    image_part,
-                    text_part,
-                ],
-                role="user",
-            )
-        ],
-    )
-
-    text = getattr(
-        response,
-        "text",
-        None,
-    )
-
-    if not text:
-
-        raise RuntimeError(
-            "Gemini Vision returned an empty response."
+    pil_image.save(image_buffer, format="JPEG", quality=90)
+    image_part = genai_types.Part.from_bytes(data=image_buffer.getvalue(), mime_type="image/jpeg")
+    text_part = genai_types.Part.from_text(text=prompt)
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[genai_types.Content(parts=[image_part, text_part], role="user")],
         )
-
+    except Exception as error:
+        _handle_gemini_exception(error)
+    text = getattr(response, "text", None)
+    if not text:
+        raise RuntimeError("Gemini Vision returned an empty response.")
     return text.strip()
 
 
@@ -720,9 +755,12 @@ def root():
 
         "mode": (
             "Live AI"
+            if gemini_available and time.time() >= gemini_quota_blocked_until
+            else "Temporarily limited"
             if gemini_available
             else "Unavailable"
         ),
+        "dynamic_monuments": len(DYNAMIC_MONUMENTS),
     }
 
 
@@ -738,6 +776,8 @@ def health():
         "gemini_available": gemini_available,
         "model": GEMINI_MODEL,
         "sdk_available": NEW_SDK,
+        "gemini_quota_limited": time.time() < gemini_quota_blocked_until,
+        "dynamic_monuments": len(DYNAMIC_MONUMENTS),
     }
 
 
@@ -747,37 +787,29 @@ def health():
 
 @app.get("/api/monuments")
 def get_monuments():
-
-    return [
-
-        {
+    """Return curated monuments and AI-discovered monuments from this session."""
+    monuments = []
+    for monument_id, info in database.MONUMENT_CATALOG.items():
+        monuments.append({
             "id": monument_id,
-
-            "canonical_name": info[
-                "canonical_name"
-            ],
-
-            "location": info[
-                "location"
-            ],
-
-            "built_by": info[
-                "built_by"
-            ],
-
-            "construction_year": info[
-                "construction_year"
-            ],
-
-            "theme": info.get(
-                "theme",
-                ""
-            ),
-        }
-
-        for monument_id, info
-        in database.MONUMENT_CATALOG.items()
-    ]
+            "canonical_name": info.get("canonical_name", monument_id),
+            "location": info.get("location", "Unknown"),
+            "built_by": info.get("built_by", "Unknown"),
+            "construction_year": info.get("construction_year", info.get("year", "Unknown")),
+            "theme": info.get("theme", info.get("architectural_style", "")),
+            "dynamic": False,
+        })
+    for monument_id, info in DYNAMIC_MONUMENTS.items():
+        monuments.append({
+            "id": monument_id,
+            "canonical_name": info.get("canonical_name", monument_id),
+            "location": info.get("location", "Unknown"),
+            "built_by": info.get("built_by", "Unknown"),
+            "construction_year": info.get("construction_year", info.get("year", "Unknown")),
+            "theme": info.get("theme", info.get("architectural_style", "")),
+            "dynamic": True,
+        })
+    return monuments
 
 
 # =============================================================================
@@ -1131,8 +1163,18 @@ Return JSON only.
 
         else:
 
-            monument_id = make_dynamic_monument_id(
-                name
+            monument_id = unique_dynamic_monument_id(name)
+
+            register_dynamic_monument(
+                monument_id=monument_id,
+                name=name,
+                location=location,
+                built_by=built_by,
+                year=year,
+                architectural_style=architectural_style,
+                key_facts=key_facts,
+                description=description,
+                confidence=confidence,
             )
 
         # -------------------------------------------------------------
@@ -1178,9 +1220,24 @@ Do not use markdown.
 Do not explain your process.
 """
 
-            narration = gemini_text(
-                narration_prompt
-            )
+            try:
+                narration = gemini_text(
+                    narration_prompt
+                )
+            except GeminiQuotaError as e:
+                logger.warning(
+                    f"Using fallback narration because Gemini quota is exhausted: {e}"
+                )
+                narration = mock_narration(
+                    {
+                        "canonical_name": name,
+                        "location": location,
+                        "built_by": built_by,
+                        "construction_year": year,
+                        "key_facts": key_facts,
+                    },
+                    language,
+                )
 
         logger.info(
             f"Monument identified: {name} "
@@ -1218,19 +1275,29 @@ Do not explain your process.
             "language": language,
 
             "mode": "live_ai",
+            "dynamic": not bool(catalog_id),
         }
+
+    except GeminiQuotaError as e:
+
+        logger.warning(f"Monument identification blocked by Gemini quota: {e}")
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "The AI service has temporarily reached its Gemini quota. "
+                "Please wait a short while and try again. Your image and application are working correctly."
+            ),
+            headers={"Retry-After": str(_quota_retry_seconds(str(e)))},
+        )
 
     except Exception as e:
 
-        logger.exception(
-            f"Monument identification failed: {e}"
-        )
-
+        logger.exception(f"Monument identification failed: {e}")
         raise HTTPException(
             status_code=500,
             detail=(
                 "Monument identification failed. "
-                f"Please try again. Error: {str(e)}"
+                "Please try again. The image or AI response could not be processed."
             ),
         )
 
@@ -1305,6 +1372,9 @@ Rules:
                 "mode": "live_ai",
             }
 
+        except GeminiQuotaError as e:
+            logger.warning(f"Narration using fallback because Gemini quota is exhausted: {e}")
+
         except Exception as e:
 
             logger.exception(
@@ -1343,7 +1413,7 @@ def chat(
 
     display_name = request.monument_id
 
-    catalog_info = database.get_monument_by_id(
+    catalog_info = get_runtime_monument(
         request.monument_id
     )
 
@@ -1484,6 +1554,9 @@ Return ONLY the guide's answer.
                 "mode": "live_ai",
             }
 
+        except GeminiQuotaError as e:
+            logger.warning(f"Chat using offline fallback because Gemini quota is exhausted: {e}")
+
         except Exception as e:
 
             logger.exception(
@@ -1502,7 +1575,9 @@ Return ONLY the guide's answer.
 
     reply = None
 
-    if catalog_info:
+    if details:
+
+        source_info = details
 
         if any(
             word in question
@@ -1518,7 +1593,7 @@ Return ONLY the guide's answer.
 
             reply = (
                 f"{display_name} was built by "
-                f"{catalog_info['built_by']}."
+                f"{source_info.get("built_by", "Unknown")}."
             )
 
         elif any(
@@ -1537,7 +1612,7 @@ Return ONLY the guide's answer.
             reply = (
                 f"The construction period of "
                 f"{display_name} is "
-                f"{catalog_info['construction_year']}."
+                f"{source_info.get("construction_year", source_info.get("year", "Unknown"))}."
             )
 
         elif any(
@@ -1553,12 +1628,12 @@ Return ONLY the guide's answer.
 
             reply = (
                 f"{display_name} is located in "
-                f"{catalog_info['location']}."
+                f"{source_info.get("location", "Unknown")}."
             )
 
         else:
 
-            facts = catalog_info.get(
+            facts = source_info.get(
                 "key_facts",
                 [],
             )
@@ -1570,12 +1645,28 @@ Return ONLY the guide's answer.
                 )
 
     if not reply:
+        fallback_messages = {
+            "English": f"I don't have enough offline information about {display_name}. Please try again when the AI service is available.",
+            "Hindi": f"{display_name} के बारे में मेरे पास पर्याप्त ऑफ़लाइन जानकारी नहीं है। कृपया AI सेवा उपलब्ध होने पर फिर प्रयास करें।",
+            "Gujarati": f"{display_name} વિશે મારી પાસે પૂરતી ઑફલાઇન માહિતી નથી. કૃપા કરીને AI સેવા ઉપલબ્ધ હોય ત્યારે ફરી પ્રયાસ કરો.",
+            "Marathi": f"{display_name} बद्दल माझ्याकडे पुरेशी ऑफलाइन माहिती नाही. कृपया AI सेवा उपलब्ध झाल्यावर पुन्हा प्रयत्न करा.",
+            "Tamil": f"{display_name} பற்றிய போதுமான ஆஃப்லைன் தகவல் என்னிடம் இல்லை. AI சேவை கிடைக்கும்போது மீண்டும் முயற்சிக்கவும்.",
+            "Telugu": f"{display_name} గురించి నా వద్ద తగినంత ఆఫ్‌లైన్ సమాచారం లేదు. AI సేవ అందుబాటులో ఉన్నప్పుడు మళ్లీ ప్రయత్నించండి.",
+            "Bengali": f"{display_name} সম্পর্কে আমার কাছে পর্যাপ্ত অফলাইন তথ্য নেই। AI পরিষেবা উপলব্ধ হলে আবার চেষ্টা করুন।",
+            "Kannada": f"{display_name} ಕುರಿತು ನನ್ನ ಬಳಿ ಸಾಕಷ್ಟು ಆಫ್‌ಲೈನ್ ಮಾಹಿತಿ ಇಲ್ಲ. AI ಸೇವೆ ಲಭ್ಯವಾದಾಗ ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ.",
+            "Punjabi": f"{display_name} ਬਾਰੇ ਮੇਰੇ ਕੋਲ ਕਾਫ਼ੀ ਆਫਲਾਈਨ ਜਾਣਕਾਰੀ ਨਹੀਂ ਹੈ। AI ਸੇਵਾ ਉਪਲਬਧ ਹੋਣ 'ਤੇ ਦੁਬਾਰਾ ਕੋਸ਼ਿਸ਼ ਕਰੋ।",
+            "French": f"Je n'ai pas assez d'informations hors ligne sur {display_name}. Veuillez réessayer lorsque le service IA sera disponible.",
+            "Spanish": f"No tengo suficiente información sin conexión sobre {display_name}. Inténtalo de nuevo cuando el servicio de IA esté disponible.",
+            "German": f"Ich habe offline nicht genügend Informationen über {display_name}. Bitte versuchen Sie es erneut, wenn der KI-Dienst verfügbar ist.",
+            "Arabic": f"ليست لدي معلومات كافية دون اتصال بالإنترنت عن {display_name}. يرجى المحاولة مرة أخرى عند توفر خدمة الذكاء الاصطناعي.",
+            "Japanese": f"{display_name}について、オフラインで利用できる十分な情報がありません。AIサービスが利用可能になったら、もう一度お試しください。",
+            "Korean": f"{display_name}에 대한 오프라인 정보가 충분하지 않습니다. AI 서비스를 사용할 수 있을 때 다시 시도해 주세요.",
+            "Portuguese": f"Não tenho informações offline suficientes sobre {display_name}. Tente novamente quando o serviço de IA estiver disponível.",
+            "Russian": f"У меня недостаточно офлайн-информации о {display_name}. Попробуйте снова, когда сервис ИИ будет доступен.",
+            "Italian": f"Non ho abbastanza informazioni offline su {display_name}. Riprova quando il servizio IA sarà disponibile.",
+        }
+        reply = fallback_messages.get(language, fallback_messages["English"])
 
-        reply = (
-            f"I don't have enough offline information "
-            f"about {display_name}. "
-            f"Please try again when the AI service is available."
-        )
 
     # -------------------------------------------------------------------------
     # IMPORTANT:

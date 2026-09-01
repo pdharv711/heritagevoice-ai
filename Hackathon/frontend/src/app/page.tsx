@@ -252,7 +252,7 @@ export default function Home() {
     setActiveTab("camera");
   };
 return (
-  <main className="min-h-screen bg-slate-50 text-gray-900 pb-12">
+  <main className="min-h-screen bg-slate-50 text-gray-900">
     <header className="bg-white border-b border-gray-200 sticky top-0 z-50 shadow-sm">
       <div className="max-w-md mx-auto px-4 py-3 flex items-center justify-between">
         <div className="flex items-center space-x-2.5">

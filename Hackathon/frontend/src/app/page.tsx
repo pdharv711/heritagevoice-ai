@@ -1,6 +1,12 @@
+
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   Camera,
   Volume2,
@@ -10,10 +16,7 @@ import {
   Info,
 } from "lucide-react";
 
-import LanguageSelector, {
-  getBcp47,
-} from "@/components/LanguageSelector";
-
+import LanguageSelector from "@/components/LanguageSelector";
 import CameraFeed from "@/components/CameraFeed";
 import ChatWindow from "@/components/ChatWindow";
 import Footer from "@/components/Footer";
@@ -33,6 +36,16 @@ interface MonumentDetails {
   [key: string]: any;
 }
 
+interface TTSResponse {
+  success?: boolean;
+  language?: string;
+  language_code?: string;
+  mime_type?: string;
+  sample_rate?: number;
+  audio_base64?: string;
+  detail?: string;
+}
+
 export default function Home() {
   // ---------------------------------------------------------
   // APP STATE
@@ -40,22 +53,20 @@ export default function Home() {
 
   const [language, setLanguage] = useState("English");
 
-  const [monumentId, setMonumentId] = useState<string | null>(
-    null
-  );
+  const [monumentId, setMonumentId] =
+    useState<string | null>(null);
 
-  const [monumentName, setMonumentName] = useState<string | null>(
-    null
-  );
+  const [monumentName, setMonumentName] =
+    useState<string | null>(null);
 
-  const [narration, setNarration] = useState<string | null>(
-    null
-  );
+  const [narration, setNarration] =
+    useState<string | null>(null);
 
   const [details, setDetails] =
     useState<MonumentDetails | null>(null);
 
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] =
+    useState(false);
 
   const [languageLoading, setLanguageLoading] =
     useState(false);
@@ -64,394 +75,112 @@ export default function Home() {
     useState<ActiveTab>("camera");
 
   // ---------------------------------------------------------
-  // SPEECH STATE
+  // GEMINI TTS STATE
   // ---------------------------------------------------------
 
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isSpeaking, setIsSpeaking] =
+    useState(false);
 
-  const [voicesReady, setVoicesReady] =
+  const [ttsLoading, setTtsLoading] =
     useState(false);
 
   const [activeVoiceName, setActiveVoiceName] =
     useState<string | null>(null);
 
-  const synthRef =
-    useRef<SpeechSynthesis | null>(null);
+  const audioRef =
+    useRef<HTMLAudioElement | null>(null);
 
-  const utteranceRef =
-    useRef<SpeechSynthesisUtterance | null>(null);
+  const audioUrlRef =
+    useRef<string | null>(null);
 
   // ---------------------------------------------------------
-  // INITIALIZE SPEECH SYNTHESIS
+  // CLEAN UP AUDIO
   // ---------------------------------------------------------
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
+  const cleanupAudio = useCallback(() => {
+    const audio = audioRef.current;
 
-    if (!("speechSynthesis" in window)) {
-      console.warn(
-        "Speech synthesis is not supported."
-      );
-
-      setVoicesReady(false);
-      return;
-    }
-
-    const synth = window.speechSynthesis;
-
-    synthRef.current = synth;
-
-    const loadVoices = () => {
-      const voices = synth.getVoices();
-
-      console.log(
-        "Browser voices:",
-        voices.map(
-          (voice) =>
-            `${voice.name} (${voice.lang})`
-        )
-      );
-
-      if (voices.length > 0) {
-        setVoicesReady(true);
+    if (audio) {
+      try {
+        audio.pause();
+        audio.currentTime = 0;
+      } catch {
+        // Ignore cleanup errors.
       }
-    };
 
-    // Initial attempt.
-    loadVoices();
-
-    // Chrome often loads voices asynchronously.
-    synth.addEventListener(
-      "voiceschanged",
-      loadVoices
-    );
-
-    // Extra retry for browsers that don't fire
-    // voiceschanged immediately.
-    const timer1 = window.setTimeout(
-      loadVoices,
-      500
-    );
-
-    const timer2 = window.setTimeout(
-      loadVoices,
-      1500
-    );
-
-    const timer3 = window.setTimeout(
-      loadVoices,
-      3000
-    );
-
-    return () => {
-      synth.removeEventListener(
-        "voiceschanged",
-        loadVoices
-      );
-
-      window.clearTimeout(timer1);
-      window.clearTimeout(timer2);
-      window.clearTimeout(timer3);
-
-      synth.cancel();
-    };
-  }, []);
-
-  // ---------------------------------------------------------
-  // STOP NARRATION
-  // ---------------------------------------------------------
-
-  const stopNarration = useCallback(() => {
-    const synth = synthRef.current;
-
-    if (synth) {
-      synth.cancel();
+      audio.onplay = null;
+      audio.onended = null;
+      audio.onerror = null;
     }
 
-    utteranceRef.current = null;
+    audioRef.current = null;
+
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(
+        audioUrlRef.current
+      );
+
+      audioUrlRef.current = null;
+    }
+
     setIsSpeaking(false);
   }, []);
 
   // ---------------------------------------------------------
-  // VOICE SEARCH
+  // STOP GEMINI NARRATION
   // ---------------------------------------------------------
 
-  const findVoice = useCallback(
-    (languageCode: string): SpeechSynthesisVoice | null => {
-      const synth = synthRef.current;
-
-      if (!synth) {
-        return null;
-      }
-
-      const voices = synth.getVoices();
-
-      if (!voices.length) {
-        return null;
-      }
-
-      const bcp47 = getBcp47(languageCode);
-
-      const target = bcp47.toLowerCase();
-
-      const prefix = target
-        .split("-")[0]
-        .toLowerCase();
-
-      console.log(
-        `Looking for voice: ${languageCode} / ${bcp47}`
-      );
-
-      // -----------------------------------------------------
-      // 1. EXACT BCP-47 MATCH
-      // -----------------------------------------------------
-
-      const exact = voices.find(
-        (voice) =>
-          voice.lang.toLowerCase() === target
-      );
-
-      if (exact) {
-        console.log(
-          "Exact voice found:",
-          exact.name,
-          exact.lang
-        );
-
-        return exact;
-      }
-
-      // -----------------------------------------------------
-      // 2. LANGUAGE FAMILY MATCH
-      // -----------------------------------------------------
-
-      const family = voices.find(
-        (voice) =>
-          voice.lang
-            .toLowerCase()
-            .split("-")[0] === prefix
-      );
-
-      if (family) {
-        console.log(
-          "Language-family voice found:",
-          family.name,
-          family.lang
-        );
-
-        return family;
-      }
-
-      // -----------------------------------------------------
-      // 3. SEARCH VOICE NAME
-      // -----------------------------------------------------
-
-      const languageNames: Record<
-        string,
-        string[]
-      > = {
-        en: [
-          "english",
-          "google us english",
-          "microsoft david",
-          "microsoft mark",
-          "microsoft zira",
-        ],
-
-        hi: [
-          "hindi",
-          "हिन्दी",
-          "google hindi",
-          "microsoft hemant",
-        ],
-
-        gu: [
-          "gujarati",
-          "ગુજરાતી",
-          "google gujarati",
-        ],
-
-        ta: [
-          "tamil",
-          "தமிழ்",
-          "google tamil",
-        ],
-
-        te: [
-          "telugu",
-          "తెలుగు",
-          "google telugu",
-        ],
-
-        bn: [
-          "bengali",
-          "বাংলা",
-          "google bengali",
-        ],
-
-        mr: [
-          "marathi",
-          "मराठी",
-          "google marathi",
-        ],
-
-        kn: [
-          "kannada",
-          "ಕನ್ನಡ",
-          "google kannada",
-        ],
-
-        pa: [
-          "punjabi",
-          "ਪੰਜਾਬੀ",
-          "google punjabi",
-        ],
-
-        fr: [
-          "french",
-          "français",
-        ],
-
-        es: [
-          "spanish",
-          "español",
-        ],
-
-        de: [
-          "german",
-          "deutsch",
-        ],
-
-        ar: [
-          "arabic",
-          "العربية",
-        ],
-
-        ja: [
-          "japanese",
-          "日本語",
-        ],
-
-        ko: [
-          "korean",
-          "한국어",
-        ],
-
-        pt: [
-          "portuguese",
-          "português",
-        ],
-
-        ru: [
-          "russian",
-          "русский",
-        ],
-
-        it: [
-          "italian",
-          "italiano",
-        ],
-      };
-
-      const possibleNames =
-        languageNames[prefix] || [];
-
-      for (const name of possibleNames) {
-        const found = voices.find((voice) =>
-          voice.name
-            .toLowerCase()
-            .includes(name.toLowerCase())
-        );
-
-        if (found) {
-          console.log(
-            "Voice-name match:",
-            found.name,
-            found.lang
-          );
-
-          return found;
-        }
-      }
-
-      return null;
-    },
-    []
-  );
+  const stopNarration = useCallback(() => {
+    cleanupAudio();
+    setTtsLoading(false);
+  }, [cleanupAudio]);
 
   // ---------------------------------------------------------
-  // SPLIT TEXT INTO SAFE SPEECH CHUNKS
+  // CLEAN UP WHEN COMPONENT UNMOUNTS
   // ---------------------------------------------------------
 
-  const splitTextForSpeech = (
-    text: string
-  ): string[] => {
-    const cleanText = text
-      .replace(/[\*#`_]/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
+  useEffect(() => {
+    return () => {
+      cleanupAudio();
+    };
+  }, [cleanupAudio]);
 
-    if (!cleanText) {
-      return [];
+  // ---------------------------------------------------------
+  // BASE64 → BLOB
+  // ---------------------------------------------------------
+
+  const base64ToBlob = (
+    base64: string,
+    mimeType: string
+  ): Blob => {
+    const binaryString =
+      window.atob(base64);
+
+    const length =
+      binaryString.length;
+
+    const bytes =
+      new Uint8Array(length);
+
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] =
+        binaryString.charCodeAt(i);
     }
 
-    // First split by sentence punctuation.
-    const sentences =
-      cleanText.match(
-        /[^.!?।！？]+[.!?।！？]?/g
-      ) || [cleanText];
-
-    const chunks: string[] = [];
-
-    for (const sentence of sentences) {
-      const trimmed = sentence.trim();
-
-      if (!trimmed) {
-        continue;
+    return new Blob(
+      [bytes],
+      {
+        type: mimeType,
       }
-
-      // Keep individual utterances reasonably short.
-      if (trimmed.length <= 220) {
-        chunks.push(trimmed);
-        continue;
-      }
-
-      const words = trimmed.split(" ");
-
-      let current = "";
-
-      for (const word of words) {
-        const candidate = current
-          ? `${current} ${word}`
-          : word;
-
-        if (candidate.length > 180) {
-          if (current) {
-            chunks.push(current);
-          }
-
-          current = word;
-        } else {
-          current = candidate;
-        }
-      }
-
-      if (current) {
-        chunks.push(current);
-      }
-    }
-
-    return chunks;
+    );
   };
 
   // ---------------------------------------------------------
-  // SPEAK TEXT
+  // GEMINI TTS
   // ---------------------------------------------------------
 
   const speakText = useCallback(
-    (
+    async (
       text: string,
       languageCode: string
     ) => {
@@ -459,240 +188,261 @@ export default function Home() {
         return;
       }
 
-      const synth = synthRef.current;
+      const cleanText =
+        text
+          ?.replace(/[\*#`_]/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
 
-      if (!synth) {
+      if (!cleanText) {
         console.warn(
-          "Speech synthesis unavailable."
+          "TTS text is empty."
         );
         return;
       }
 
-      if (!text || !text.trim()) {
-        return;
-      }
+      // Stop any currently playing audio.
+      cleanupAudio();
 
-      // Stop current speech.
-      synth.cancel();
+      setTtsLoading(true);
+      setActiveVoiceName(
+        "Gemini TTS · Kore"
+      );
 
-      setIsSpeaking(false);
-
-      const bcp47 =
-        getBcp47(languageCode);
-
-      const chunks =
-        splitTextForSpeech(text);
-
-      if (!chunks.length) {
-        return;
-      }
-
-      const startSpeech = () => {
-        const voice =
-          findVoice(languageCode);
-
+      try {
         console.log(
           "--------------------------------"
         );
 
         console.log(
-          "Speech language:",
+          "Gemini TTS request"
+        );
+
+        console.log(
+          "Language:",
           languageCode
         );
 
         console.log(
-          "BCP-47:",
-          bcp47
-        );
-
-        console.log(
-          "Voice:",
-          voice
-            ? `${voice.name} (${voice.lang})`
-            : "NOT FOUND"
+          "API:",
+          `${API_BASE_URL}/api/tts`
         );
 
         console.log(
           "--------------------------------"
         );
 
-        // IMPORTANT:
-        // Never use an unrelated language voice.
-        if (!voice) {
-          setActiveVoiceName(
-            `No ${languageCode} voice available`
+        const response =
+          await fetch(
+            `${API_BASE_URL}/api/tts`,
+            {
+              method: "POST",
+
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
+
+              body: JSON.stringify({
+                text: cleanText,
+                language: languageCode,
+              }),
+            }
+          );
+
+        if (!response.ok) {
+          let errorMessage =
+            `TTS request failed (${response.status})`;
+
+          try {
+            const errorData =
+              await response.json();
+
+            if (errorData?.detail) {
+              errorMessage =
+                String(
+                  errorData.detail
+                );
+            }
+          } catch {
+            const errorText =
+              await response.text();
+
+            if (errorText) {
+              errorMessage =
+                errorText;
+            }
+          }
+
+          throw new Error(
+            errorMessage
+          );
+        }
+
+        const data =
+          (await response.json()) as TTSResponse;
+
+        console.log(
+          "Gemini TTS response:",
+          {
+            success: data.success,
+            language: data.language,
+            language_code:
+              data.language_code,
+            mime_type:
+              data.mime_type,
+            sample_rate:
+              data.sample_rate,
+            has_audio:
+              Boolean(
+                data.audio_base64
+              ),
+          }
+        );
+
+        if (
+          !data.audio_base64
+        ) {
+          throw new Error(
+            "Backend returned no audio data."
+          );
+        }
+
+        const mimeType =
+          data.mime_type ||
+          "audio/wav";
+
+        const audioBlob =
+          base64ToBlob(
+            data.audio_base64,
+            mimeType
+          );
+
+        const audioUrl =
+          URL.createObjectURL(
+            audioBlob
+          );
+
+        audioUrlRef.current =
+          audioUrl;
+
+        const audio =
+          new Audio(audioUrl);
+
+        audio.preload = "auto";
+
+        audioRef.current =
+          audio;
+
+        audio.onplay = () => {
+          setIsSpeaking(true);
+          setTtsLoading(false);
+
+          console.log(
+            "Gemini TTS playback started."
+          );
+        };
+
+        audio.onended = () => {
+          setIsSpeaking(false);
+          setTtsLoading(false);
+
+          if (
+            audioUrlRef.current ===
+            audioUrl
+          ) {
+            URL.revokeObjectURL(
+              audioUrl
+            );
+
+            audioUrlRef.current =
+              null;
+          }
+
+          audioRef.current =
+            null;
+
+          console.log(
+            "Gemini TTS playback completed."
+          );
+        };
+
+        audio.onerror = () => {
+          console.error(
+            "HTML audio playback failed."
           );
 
           setIsSpeaking(false);
+          setTtsLoading(false);
 
-          console.warn(
-            `No browser voice found for ${languageCode} (${bcp47}).`
-          );
-
-          return;
-        }
-
-        let index = 0;
-        let cancelled = false;
-
-        const speakNext = () => {
-          if (cancelled) {
-            return;
-          }
-
-          if (index >= chunks.length) {
-            setIsSpeaking(false);
-            utteranceRef.current = null;
-
-            console.log(
-              "Speech completed:",
-              languageCode
+          if (
+            audioUrlRef.current ===
+            audioUrl
+          ) {
+            URL.revokeObjectURL(
+              audioUrl
             );
 
-            return;
-          }
-
-          const chunk = chunks[index];
-
-          const utterance =
-            new SpeechSynthesisUtterance(
-              chunk
-            );
-
-          utteranceRef.current =
-            utterance;
-
-          // Use the actual selected voice language.
-          utterance.voice = voice;
-
-          utterance.lang =
-            voice.lang || bcp47;
-
-          utterance.rate = 0.9;
-          utterance.pitch = 1;
-          utterance.volume = 1;
-
-          utterance.onstart = () => {
-            setIsSpeaking(true);
-
-            setActiveVoiceName(
-              `${voice.name} (${voice.lang})`
-            );
-          };
-
-          utterance.onend = () => {
-            index += 1;
-
-            window.setTimeout(
-              speakNext,
-              60
-            );
-          };
-
-          utterance.onerror = (event) => {
-            console.error(
-              "Speech synthesis error:",
-              event
-            );
-
-            setIsSpeaking(false);
-
-            utteranceRef.current =
+            audioUrlRef.current =
               null;
-          };
-
-          try {
-            synth.speak(utterance);
-          } catch (error) {
-            console.error(
-              "Could not start speech:",
-              error
-            );
-
-            setIsSpeaking(false);
           }
+
+          audioRef.current =
+            null;
         };
 
-        speakNext();
-      };
-
-      // Give Chrome time to populate its voice list.
-      const voices = synth.getVoices();
-
-      if (voices.length > 0) {
-        window.setTimeout(
-          startSpeech,
-          100
-        );
-
-        return;
-      }
-
-      let finished = false;
-
-      const handleVoicesChanged = () => {
-        if (finished) {
-          return;
-        }
-
-        const loaded =
-          synth.getVoices();
-
-        if (!loaded.length) {
-          return;
-        }
-
-        finished = true;
-
-        synth.removeEventListener(
-          "voiceschanged",
-          handleVoicesChanged
-        );
-
-        setVoicesReady(true);
-
-        window.setTimeout(
-          startSpeech,
-          100
-        );
-      };
-
-      synth.addEventListener(
-        "voiceschanged",
-        handleVoicesChanged
-      );
-
-      // Final retry.
-      window.setTimeout(() => {
-        if (finished) {
-          return;
-        }
-
-        finished = true;
-
-        synth.removeEventListener(
-          "voiceschanged",
-          handleVoicesChanged
-        );
-
-        const loaded =
-          synth.getVoices();
-
-        if (loaded.length > 0) {
-          setVoicesReady(true);
-          startSpeech();
-        } else {
-          setActiveVoiceName(
-            `No browser voices available`
-          );
-
+        try {
+          await audio.play();
+        } catch (playError) {
           console.warn(
-            "Browser did not provide any TTS voices."
+            "Automatic audio playback was blocked:",
+            playError
+          );
+
+          setIsSpeaking(false);
+          setTtsLoading(false);
+
+          /*
+           * The browser may block automatic playback
+           * after an asynchronous API request.
+           *
+           * The generated audio is still available
+           * through the Listen button, which is a direct
+           * user interaction.
+           */
+          throw new Error(
+            "Audio was generated, but the browser blocked automatic playback. Press Listen to play it."
           );
         }
-      }, 3000);
+      } catch (error) {
+        console.error(
+          "Gemini TTS error:",
+          error
+        );
+
+        setIsSpeaking(false);
+        setTtsLoading(false);
+
+        /*
+         * Do not show an alert when the browser merely
+         * blocks automatic playback. The narration itself
+         * was successfully generated in that situation.
+         */
+        const message =
+          String(error);
+
+        if (
+          !message.includes(
+            "blocked automatic playback"
+          )
+        ) {
+          alert(
+            `Gemini TTS could not generate audio.\n\n${message}`
+          );
+        }
+      }
     },
-    [findVoice]
+    [cleanupAudio]
   );
 
   // ---------------------------------------------------------
@@ -718,8 +468,12 @@ export default function Home() {
         !monumentName ||
         !details
       ) {
-        setLanguage(newLanguage);
+        setLanguage(
+          newLanguage
+        );
+
         setActiveVoiceName(null);
+
         return;
       }
 
@@ -777,13 +531,21 @@ export default function Home() {
           data.narration
         );
 
-        setActiveVoiceName(null);
+        setActiveVoiceName(
+          null
+        );
 
-        setActiveTab("audio");
+        setActiveTab(
+          "audio"
+        );
 
-        // Wait for React state/UI update.
+        /*
+         * Try to automatically speak the new narration.
+         * If the browser blocks autoplay, the user can
+         * simply press Listen.
+         */
         window.setTimeout(() => {
-          speakText(
+          void speakText(
             data.narration,
             newLanguage
           );
@@ -794,7 +556,6 @@ export default function Home() {
           error
         );
 
-        // Keep the selected language.
         setLanguage(
           newLanguage
         );
@@ -896,10 +657,12 @@ export default function Home() {
           null
         );
 
-        // Give browser time to update the UI
-        // before starting audio.
+        /*
+         * Give React time to update the UI before
+         * attempting Gemini TTS playback.
+         */
         window.setTimeout(() => {
-          speakText(
+          void speakText(
             data.narration,
             language
           );
@@ -936,7 +699,9 @@ ${String(error)}`
 
     setActiveVoiceName(null);
 
-    setActiveTab("camera");
+    setActiveTab(
+      "camera"
+    );
   };
 
   // ---------------------------------------------------------
@@ -980,23 +745,29 @@ ${String(error)}`
 
             <span
               className={`inline-flex items-center gap-1 text-[9px] font-semibold ${
-                voicesReady
+                isSpeaking
                   ? "text-green-600"
-                  : "text-amber-500"
+                  : ttsLoading
+                  ? "text-amber-500"
+                  : "text-gray-400"
               }`}
             >
 
               <span
                 className={`w-1.5 h-1.5 rounded-full ${
-                  voicesReady
+                  isSpeaking
                     ? "bg-green-500"
-                    : "bg-amber-400 animate-pulse"
+                    : ttsLoading
+                    ? "bg-amber-400 animate-pulse"
+                    : "bg-gray-300"
                 }`}
               />
 
-              {voicesReady
-                ? "Voice Ready"
-                : "Loading voices…"}
+              {isSpeaking
+                ? "Gemini Speaking"
+                : ttsLoading
+                ? "Generating Audio…"
+                : "Gemini TTS Ready"}
 
             </span>
 
@@ -1014,7 +785,9 @@ ${String(error)}`
         <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
 
           <LanguageSelector
-            selectedLanguage={language}
+            selectedLanguage={
+              language
+            }
             onChange={
               handleLanguageChange
             }
@@ -1037,10 +810,13 @@ ${String(error)}`
 
           <button
             onClick={() =>
-              setActiveTab("camera")
+              setActiveTab(
+                "camera"
+              )
             }
             className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
-              activeTab === "camera"
+              activeTab ===
+              "camera"
                 ? "bg-rose-500 text-white font-bold shadow-sm"
                 : "text-gray-500 hover:text-gray-800 font-medium"
             }`}
@@ -1055,11 +831,16 @@ ${String(error)}`
           <button
             onClick={() =>
               monumentId &&
-              setActiveTab("audio")
+              setActiveTab(
+                "audio"
+              )
             }
-            disabled={!monumentId}
+            disabled={
+              !monumentId
+            }
             className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
-              activeTab === "audio"
+              activeTab ===
+              "audio"
                 ? "bg-rose-500 text-white font-bold shadow-sm"
                 : monumentId
                 ? "text-gray-500 hover:text-gray-800 font-medium"
@@ -1076,11 +857,16 @@ ${String(error)}`
           <button
             onClick={() =>
               monumentId &&
-              setActiveTab("chat")
+              setActiveTab(
+                "chat"
+              )
             }
-            disabled={!monumentId}
+            disabled={
+              !monumentId
+            }
             className={`flex flex-col items-center py-2 px-1 rounded-xl transition-all ${
-              activeTab === "chat"
+              activeTab ===
+              "chat"
                 ? "bg-rose-500 text-white font-bold shadow-sm"
                 : monumentId
                 ? "text-gray-500 hover:text-gray-800 font-medium"
@@ -1150,6 +936,7 @@ ${String(error)}`
                   </ul>
 
                 </div>
+
               </div>
 
             </div>
@@ -1201,6 +988,8 @@ ${String(error)}`
                         className={`p-2 rounded-lg ${
                           isSpeaking
                             ? "bg-rose-500 text-white animate-pulse"
+                            : ttsLoading
+                            ? "bg-amber-100 text-amber-600 animate-pulse"
                             : "bg-gray-200 text-gray-600"
                         }`}
                       >
@@ -1210,7 +999,7 @@ ${String(error)}`
                       <div>
 
                         <h4 className="font-bold text-xs">
-                          Audio Guide Playback
+                          Gemini Audio Guide
                         </h4>
 
                         <p className="text-[10px] text-gray-500 font-medium">
@@ -1237,25 +1026,34 @@ ${String(error)}`
                     </div>
 
                     <button
-                      onClick={() =>
-                        isSpeaking
-                          ? stopNarration()
-                          : speakText(
-                              narration,
-                              language
-                            )
-                      }
+                      onClick={() => {
+                        if (
+                          isSpeaking ||
+                          ttsLoading
+                        ) {
+                          stopNarration();
+                        } else {
+                          void speakText(
+                            narration,
+                            language
+                          );
+                        }
+                      }}
                       disabled={
                         languageLoading
                       }
                       className={`py-2 px-4 font-bold text-xs rounded-lg transition-all ${
                         isSpeaking
                           ? "bg-gray-800 text-white hover:bg-gray-900"
+                          : ttsLoading
+                          ? "bg-amber-500 text-white cursor-wait"
                           : "bg-rose-500 text-white hover:bg-rose-600 shadow-md shadow-rose-100"
                       }`}
                     >
                       {isSpeaking
                         ? "⏹ Stop"
+                        : ttsLoading
+                        ? "⏳ Generating"
                         : "▶ Listen"}
                     </button>
 
@@ -1301,6 +1099,7 @@ ${String(error)}`
                     <div className="grid grid-cols-2 gap-3.5 text-xs">
 
                       <div>
+
                         <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
                           Location
                         </p>
@@ -1309,9 +1108,11 @@ ${String(error)}`
                           {details.location ||
                             "—"}
                         </p>
+
                       </div>
 
                       <div>
+
                         <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
                           Built By
                         </p>
@@ -1320,9 +1121,11 @@ ${String(error)}`
                           {details.built_by ||
                             "—"}
                         </p>
+
                       </div>
 
                       <div>
+
                         <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
                           Construction Era
                         </p>
@@ -1331,9 +1134,11 @@ ${String(error)}`
                           {details.construction_year ||
                             "—"}
                         </p>
+
                       </div>
 
                       <div>
+
                         <p className="text-gray-400 font-semibold uppercase text-[9px] tracking-wider">
                           Architectural Style
                         </p>
@@ -1342,6 +1147,7 @@ ${String(error)}`
                           {details.theme ||
                             "—"}
                         </p>
+
                       </div>
 
                     </div>
@@ -1371,6 +1177,7 @@ ${String(error)}`
                                   }
                                   className="flex gap-2 text-xs font-semibold text-gray-700 leading-normal"
                                 >
+
                                   <span className="text-rose-500">
                                     •
                                   </span>
@@ -1380,6 +1187,7 @@ ${String(error)}`
                                       fact
                                     }
                                   </span>
+
                                 </li>
                               )
                             )}
@@ -1438,3 +1246,4 @@ ${String(error)}`
     </main>
   );
 }
+

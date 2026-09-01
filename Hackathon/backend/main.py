@@ -1,4 +1,3 @@
-
 import json
 import logging
 import os
@@ -86,7 +85,7 @@ class GeminiQuotaError(RuntimeError):
 # Can be overridden using Render environment variable GEMINI_MODEL.
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
-    "gemini-3.7-flash",
+    "gemini-3.6-flash",
 )
 
 

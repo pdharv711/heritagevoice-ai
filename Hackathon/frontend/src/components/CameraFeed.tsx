@@ -1,148 +1,444 @@
 "use client";
 
-import React, { useRef, useState, useEffect, useCallback } from "react";
-import { Camera, RefreshCw, Upload, AlertCircle, X, ImageIcon } from "lucide-react";
+import React, {
+  useRef,
+  useState,
+  useEffect,
+  useCallback,
+} from "react";
+
+import {
+  Camera,
+  RefreshCw,
+  Upload,
+  AlertCircle,
+  X,
+  ImageIcon,
+} from "lucide-react";
 
 interface CameraFeedProps {
   onCapture: (base64Image: string) => void;
   isLoading: boolean;
 }
 
-export default function CameraFeed({ onCapture, isLoading }: CameraFeedProps) {
+export default function CameraFeed({
+  onCapture,
+  isLoading,
+}: CameraFeedProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [stream, setStream] = useState<MediaStream | null>(null);
-  const [facingMode, setFacingMode] = useState<"user" | "environment">("environment");
-  const [permissionError, setPermissionError] = useState<string | null>(null);
-  const [cameraActive, setCameraActive] = useState<boolean>(false);
+  const [facingMode, setFacingMode] = useState<
+    "user" | "environment"
+  >("environment");
+
+  const [permissionError, setPermissionError] = useState<string | null>(
+    null
+  );
+
+  const [cameraActive, setCameraActive] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Start the camera feed
-  const startCamera = async () => {
+  // ============================================================
+  // STOP CAMERA
+  // ============================================================
+
+  const stopCamera = useCallback(() => {
+    setStream((currentStream) => {
+      if (currentStream) {
+        currentStream.getTracks().forEach((track) => {
+          track.stop();
+        });
+      }
+
+      return null;
+    });
+
+    setCameraActive(false);
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }, []);
+
+  // ============================================================
+  // START CAMERA
+  // ============================================================
+
+  const startCamera = useCallback(async () => {
     setPermissionError(null);
+
+    // Stop previous stream
     if (stream) {
       stream.getTracks().forEach((track) => track.stop());
+    }
+
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      setPermissionError(
+        "Camera is not supported by this browser. Please upload an image instead."
+      );
+
+      setCameraActive(false);
+      return;
     }
 
     try {
-      const constraints = {
+      const constraints: MediaStreamConstraints = {
         video: {
-          facingMode: facingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          facingMode: {
+            ideal: facingMode,
+          },
+          width: {
+            ideal: 1280,
+          },
+          height: {
+            ideal: 720,
+          },
         },
         audio: false,
       };
-      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      const mediaStream =
+        await navigator.mediaDevices.getUserMedia(constraints);
+
       setStream(mediaStream);
+
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
+
+        // Make sure the video starts playing.
+        try {
+          await videoRef.current.play();
+        } catch (playError) {
+          console.warn(
+            "Video autoplay warning:",
+            playError
+          );
+        }
       }
+
       setCameraActive(true);
-    } catch (err: any) {
-      console.error("Camera access error:", err);
-      setPermissionError(
-        "Could not access camera. Please allow camera permissions or upload an image file instead."
-      );
+    } catch (error) {
+      console.error("Camera access error:", error);
+
       setCameraActive(false);
-    }
-  };
 
-  // Stop the camera feed
-  const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
-      setStream(null);
+      setPermissionError(
+        "Could not access the camera. Please allow camera permission or upload an image instead."
+      );
     }
-    setCameraActive(false);
-  };
+  }, [facingMode, stream]);
 
-  // Start camera on mount and cleanup on unmount
+  // ============================================================
+  // CAMERA LIFECYCLE
+  // ============================================================
+
   useEffect(() => {
-    startCamera();
+    let mounted = true;
+
+    const initializeCamera = async () => {
+      if (!mounted) return;
+
+      await startCamera();
+    };
+
+    initializeCamera();
+
     return () => {
+      mounted = false;
+
       if (stream) {
-        stream.getTracks().forEach((track) => track.stop());
+        stream.getTracks().forEach((track) => {
+          track.stop();
+        });
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
       }
     };
   }, [facingMode]);
 
-  // Toggle front/back camera
+  // ============================================================
+  // TOGGLE FRONT / BACK CAMERA
+  // ============================================================
+
   const toggleCamera = () => {
-    setFacingMode((prev) => (prev === "user" ? "environment" : "user"));
+    setFacingMode((previous) =>
+      previous === "user" ? "environment" : "user"
+    );
   };
 
-  // Capture frame from live video
+  // ============================================================
+  // CAPTURE CAMERA FRAME
+  // ============================================================
+
   const captureFrame = () => {
-    if (videoRef.current && canvasRef.current) {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
 
-      if (ctx) {
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-        if (facingMode === "user") {
-          ctx.translate(canvas.width, 0);
-          ctx.scale(-1, 1);
-        }
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
-        setPreviewImage(dataUrl);
-        onCapture(dataUrl);
-      }
+    if (!video || !canvas) {
+      alert("Camera is not ready yet. Please try again.");
+      return;
     }
+
+    if (
+      !video.videoWidth ||
+      !video.videoHeight
+    ) {
+      alert(
+        "Camera image is not ready yet. Please wait a moment and try again."
+      );
+      return;
+    }
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      alert("Could not process the camera image.");
+      return;
+    }
+
+    // Use the actual camera resolution.
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    // Reset canvas transformation.
+    context.setTransform(1, 0, 0, 1, 0, 0);
+
+    // Mirror front camera preview/capture.
+    if (facingMode === "user") {
+      context.translate(canvas.width, 0);
+      context.scale(-1, 1);
+    }
+
+    context.drawImage(
+      video,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+
+    // Always create a JPEG data URI.
+    // This is compatible with the FastAPI backend.
+    const dataUrl = canvas.toDataURL(
+      "image/jpeg",
+      0.85
+    );
+
+    if (
+      !dataUrl ||
+      !dataUrl.startsWith("data:image/jpeg;base64,")
+    ) {
+      alert("Could not create a valid image.");
+      return;
+    }
+
+    console.log(
+      "Camera image captured successfully:",
+      dataUrl.substring(0, 40) + "..."
+    );
+
+    setPreviewImage(dataUrl);
+
+    // Send proper Base64 data URI to page.tsx.
+    onCapture(dataUrl);
   };
 
-  // Process an image file (from upload or drag-drop)
+  // ============================================================
+  // PROCESS UPLOADED IMAGE
+  // ============================================================
+
   const processFile = useCallback(
     (file: File) => {
-      // Validate file type
-      const validTypes = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/heic"];
-      if (!validTypes.includes(file.type) && !file.name.match(/\.(jpe?g|png|webp|gif|heic)$/i)) {
-        alert("Please upload a valid image file (JPEG, PNG, WEBP, GIF, HEIC).");
+      if (!file) {
+        return;
+      }
+
+      // Supported formats
+      const validMimeTypes = [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+      ];
+
+      const validExtensions =
+        /\.(jpe?g|png|webp)$/i;
+
+      const isValidMimeType =
+        validMimeTypes.includes(file.type);
+
+      const isValidExtension =
+        validExtensions.test(file.name);
+
+      if (
+        !isValidMimeType &&
+        !isValidExtension
+      ) {
+        alert(
+          "Please upload a valid JPG, PNG, or WEBP image."
+        );
+        return;
+      }
+
+      // Prevent extremely large files.
+      const MAX_FILE_SIZE =
+        10 * 1024 * 1024; // 10 MB
+
+      if (file.size > MAX_FILE_SIZE) {
+        alert(
+          "Image is too large. Please upload an image smaller than 10 MB."
+        );
         return;
       }
 
       const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === "string") {
-          setPreviewImage(reader.result);
-          onCapture(reader.result);
+
+      reader.onload = () => {
+        if (
+          typeof reader.result !== "string"
+        ) {
+          alert(
+            "Could not read the selected image."
+          );
+          return;
         }
+
+        const dataUrl = reader.result;
+
+        // Make absolutely sure the result is an image data URI.
+        if (
+          !dataUrl.startsWith("data:image/")
+        ) {
+          alert(
+            "The selected file could not be converted into a valid image."
+          );
+          return;
+        }
+
+        console.log(
+          "Image uploaded successfully:",
+          dataUrl.substring(0, 40) + "..."
+        );
+
+        setPreviewImage(dataUrl);
+
+        // Send Base64 data URI to page.tsx.
+        onCapture(dataUrl);
       };
+
+      reader.onerror = () => {
+        console.error(
+          "FileReader error:",
+          reader.error
+        );
+
+        alert(
+          "Could not read the image file. Please try another image."
+        );
+      };
+
       reader.readAsDataURL(file);
     },
     [onCapture]
   );
 
-  // Handle click-to-upload
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) processFile(file);
-    // Reset input so the same file can be re-selected
-    e.target.value = "";
+  // ============================================================
+  // FILE INPUT
+  // ============================================================
+
+  const handleFileUpload = (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+
+    if (file) {
+      processFile(file);
+    }
+
+    // Allow selecting the same file again.
+    event.target.value = "";
   };
 
-  // Drag-and-drop handlers
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) processFile(file);
+  // ============================================================
+  // OPEN FILE PICKER
+  // ============================================================
+
+  const openFilePicker = () => {
+    fileInputRef.current?.click();
   };
 
-  const clearPreview = () => setPreviewImage(null);
+  // ============================================================
+  // DRAG OVER
+  // ============================================================
+
+  const handleDragOver = (
+    event: React.DragEvent<HTMLDivElement>
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (!isLoading) {
+      setIsDragging(true);
+    }
+  };
+
+  // ============================================================
+  // DRAG LEAVE
+  // ============================================================
+
+  const handleDragLeave = (
+    event: React.DragEvent<HTMLDivElement>
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    setIsDragging(false);
+  };
+
+  // ============================================================
+  // DROP IMAGE
+  // ============================================================
+
+  const handleDrop = (
+    event: React.DragEvent<HTMLDivElement>
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    setIsDragging(false);
+
+    if (isLoading) {
+      return;
+    }
+
+    const file = event.dataTransfer.files?.[0];
+
+    if (file) {
+      processFile(file);
+    }
+  };
+
+  // ============================================================
+  // CLEAR PREVIEW
+  // ============================================================
+
+  const clearPreview = () => {
+    setPreviewImage(null);
+
+    // Restart camera if it was stopped.
+    if (!cameraActive) {
+      startCamera();
+    }
+  };
 
   return (
     <div className="flex flex-col items-center bg-gray-50 rounded-2xl border border-gray-200 overflow-hidden shadow-inner w-full relative">

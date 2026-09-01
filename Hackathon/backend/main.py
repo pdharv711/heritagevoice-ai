@@ -67,7 +67,7 @@ app.add_middleware(
 # GEMINI CONFIGURATION
 # =============================================================================
 
-GEMINI_MODEL = "gemini-3.7-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 
 # Dedicated Gemini TTS model.
 GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
